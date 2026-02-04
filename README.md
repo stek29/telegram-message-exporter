@@ -84,6 +84,20 @@ If you prefer a requirements file:
 pip install -r requirements.txt
 ```
 
+### Install from GitHub (latest)
+
+```bash
+pip install -U "git+https://github.com/soakes/telegram-message-exporter.git"
+```
+
+### Clone from GitHub
+
+```bash
+git clone https://github.com/soakes/telegram-message-exporter.git
+cd telegram-message-exporter
+pip install -e .
+```
+
 ---
 
 ## Quick Start
@@ -244,6 +258,21 @@ To bump the version:
 ```
 
 ---
+
+## Updating
+
+If installed from GitHub:
+
+```bash
+pip install -U "git+https://github.com/soakes/telegram-message-exporter.git"
+```
+
+If installed from a local clone:
+
+```bash
+git pull
+pip install -e .
+```
 
 ## Quality Checks
 
