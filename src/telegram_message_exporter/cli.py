@@ -9,7 +9,7 @@ from typing import Optional
 
 import sqlite3
 
-from . import crypto
+from . import __version__, crypto
 from .db import (
     FetchOptions,
     detect_message_table,
@@ -210,6 +210,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Telegram Desktop (macOS) message recovery tools",
         formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show version and exit",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

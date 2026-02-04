@@ -420,9 +420,7 @@ def _render_header(handle, title: str) -> None:
     handle.write('<div class="logo">💬</div>')
     handle.write('<div class="title-area">')
     handle.write(f"<h1>{html.escape(title)}</h1>")
-    handle.write(
-        '<p class="subtitle">Recovery export for Telegram Desktop (macOS)</p>'
-    )
+    handle.write('<p class="subtitle">Recovery export for Telegram Desktop (macOS)</p>')
     handle.write("</div></div>")
     handle.write(
         '<div class="badge glass"><span class="dot"></span>'

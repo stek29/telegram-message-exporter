@@ -21,6 +21,7 @@ A professional, offline recovery and export tool for **Telegram Desktop (macOS)*
 - [Example Output](#example-output)
 - [Date Filtering](#date-filtering)
 - [Safety & Privacy](#safety--privacy)
+- [Versioning](#versioning)
 - [Quality Checks](#quality-checks)
 - [Troubleshooting](#troubleshooting)
 - [Project Structure](#project-structure)
@@ -218,6 +219,16 @@ Formats supported:
 
 ---
 
+## Versioning
+
+The canonical version is stored in `VERSION` and exposed via:
+
+```bash
+telegram-exporter --version
+```
+
+---
+
 ## Quality Checks
 
 Run formatting and linting locally:
@@ -272,7 +283,7 @@ telegram-message-exporter/
 
 ## Credits
 
-This project builds on community reverse‑engineering work. The initial breakthrough and reference implementation for Telegram Desktop’s local key format and Postbox structure comes from **@stek29**. This tool extends those ideas into a polished, end‑user‑friendly CLI and export workflow.
+This project builds on community reverse‑engineering work. The initial breakthrough and reference implementation for Telegram Desktop’s local key format and Postbox structure comes from **@stek29** (GitHub). This tool extends those ideas into a polished, end‑user‑friendly CLI and export workflow.
 
 - https://gist.github.com/stek29/8a7ac0e673818917525ec4031d77a713
 
