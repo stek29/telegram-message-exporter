@@ -3,6 +3,8 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-macOS-111111.svg)](#)
 [![Telegram](https://img.shields.io/badge/Telegram-Desktop-2CA5E0.svg)](https://desktop.telegram.org/)
+[![CI](https://github.com/soakes/telegram-message-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/soakes/telegram-message-exporter/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://black.readthedocs.io/)
 [![Ruff](https://img.shields.io/badge/lint-ruff-262626.svg)](https://docs.astral.sh/ruff/)
 [![Pylint](https://img.shields.io/badge/lint-pylint-ffcd00.svg)](https://pylint.readthedocs.io/)
@@ -26,6 +28,7 @@ A professional, offline recovery and export tool for **Telegram Desktop (macOS)*
 - [Troubleshooting](#troubleshooting)
 - [Project Structure](#project-structure)
 - [Credits](#credits)
+- [License](#license)
 
 ---
 
@@ -335,3 +338,9 @@ This project builds on community reverse‑engineering work. The initial breakth
 ---
 
 For enhancements or alternate export styles, feel free to open a PR (or fork and submit one). We’ll review and merge solid improvements—this repo is meant to be a good base to build on.
+
+---
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE` for details.
