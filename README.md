@@ -18,6 +18,7 @@ A professional, offline recovery and export tool for **Telegram Desktop (macOS)*
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Export Formats](#export-formats)
+- [Example Output](#example-output)
 - [Date Filtering](#date-filtering)
 - [Safety & Privacy](#safety--privacy)
 - [Quality Checks](#quality-checks)
@@ -146,6 +147,47 @@ telegram-exporter export --db plaintext.db --peer-id 123456789 --format csv --ou
 
 ---
 
+## Example Output
+
+### HTML (snippet)
+
+```html
+<header class="glass header-panel">
+  <div class="brand">
+    <div class="logo">💬</div>
+    <div class="title-area">
+      <h1>Alice Example</h1>
+      <p class="subtitle">Recovery export for Telegram Desktop (macOS)</p>
+    </div>
+  </div>
+  <div class="badge glass"><span class="dot"></span><span class="text">Ready</span></div>
+</header>
+```
+
+### Markdown (snippet)
+
+```markdown
+# Telegram Chat History: Alice Example
+
+**Exported:** 2026-02-04 16:05:12
+**Total Messages:** 418
+
+## Wednesday, February 04, 2026
+
+**14:13:09 — Me**
+
+3h48 is good also
+```
+
+### CSV (snippet)
+
+```csv
+date,time,timestamp,direction,speaker,text,peer_id,author_id
+2026-02-04,14:13:09,1770214389,out,Me,"3h48 is good also",23556879,23556879
+```
+
+---
+
 ## Date Filtering
 
 Export only a range (inclusive):
@@ -230,10 +272,10 @@ telegram-message-exporter/
 
 ## Credits
 
-This project was informed by community research and reverse‑engineering work. In particular, the following reference was instrumental in understanding Telegram Desktop’s local key format and Postbox structure:
+This project builds on community reverse‑engineering work. The initial breakthrough and reference implementation for Telegram Desktop’s local key format and Postbox structure comes from **@stek29**. This tool extends those ideas into a polished, end‑user‑friendly CLI and export workflow.
 
 - https://gist.github.com/stek29/8a7ac0e673818917525ec4031d77a713
 
 ---
 
-For enhancements or alternate export styles, open an issue with requirements and examples.
+For enhancements or alternate export styles, feel free to open a PR (or fork and submit one). We’ll review and merge solid improvements—this repo is meant to be a good base to build on.

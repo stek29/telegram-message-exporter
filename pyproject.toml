@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.24.0"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-message-exporter"
@@ -17,8 +17,8 @@ dependencies = [
 [project.scripts]
 telegram-exporter = "telegram_message_exporter.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["telegram_message_exporter"]
+[tool.setuptools]
+package-dir = {"" = "src"}
 
-[tool.hatch.build.targets.sdist]
-include = ["src/telegram_message_exporter", "README.md", "requirements.txt", "pyproject.toml"]
+[tool.setuptools.packages.find]
+where = ["src"]

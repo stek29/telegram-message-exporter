@@ -421,7 +421,7 @@ def _render_header(handle, title: str) -> None:
     handle.write('<div class="title-area">')
     handle.write(f"<h1>{html.escape(title)}</h1>")
     handle.write(
-        '<p class="subtitle">Local-only recovery export for Telegram Desktop</p>'
+        '<p class="subtitle">Recovery export for Telegram Desktop (macOS)</p>'
     )
     handle.write("</div></div>")
     handle.write(
