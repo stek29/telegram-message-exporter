@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -268,6 +269,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """Entry point for CLI usage."""
     parser = build_parser()
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return
     args = parser.parse_args()
     args.func(args)
 
