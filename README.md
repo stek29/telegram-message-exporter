@@ -48,6 +48,8 @@ format.
 
 ---
 
+<a id="overview"></a>
+
 ## 📖 Overview
 
 Telegram for macOS stores local message data in an encrypted SQLite database.
@@ -81,6 +83,8 @@ messages back into Telegram, or upload recovered data anywhere.
 
 ---
 
+<a id="capabilities"></a>
+
 ## ✨ Capabilities
 
 - **Offline decryption**: derives SQLCipher keys from Telegram's local
@@ -98,6 +102,8 @@ messages back into Telegram, or upload recovered data anywhere.
   cache does not match the expected shape
 
 ---
+
+<a id="how-it-works"></a>
 
 ## 🔄 How It Works
 
@@ -145,6 +151,8 @@ sequenceDiagram
 
 ---
 
+<a id="requirements"></a>
+
 ## ✅ Requirements
 
 - macOS with native Telegram for macOS data present
@@ -160,6 +168,8 @@ brew install sqlcipher
 ```
 
 ---
+
+<a id="quick-start"></a>
 
 ## 🚀 Quick Start
 
@@ -233,6 +243,8 @@ telegram-exporter export \
 
 ---
 
+<a id="usage"></a>
+
 ## 🧪 Usage
 
 ### Export HTML for one chat
@@ -304,6 +316,8 @@ telegram-exporter decrypt \
 
 ---
 
+<a id="cli-reference"></a>
+
 ## 🧰 CLI Reference
 
 | Command | Purpose |
@@ -355,6 +369,8 @@ telegram-exporter decrypt \
 
 ---
 
+<a id="output-formats"></a>
+
 ## 📄 Output Formats
 
 | Format | Best for | Notes |
@@ -390,6 +406,8 @@ date,time,timestamp,direction,speaker,text,peer_id,author_id
 
 ---
 
+<a id="key-paths"></a>
+
 ## 🗺️ Key Paths
 
 Native Telegram for macOS typically stores recovery-relevant files here:
@@ -409,6 +427,8 @@ about which plaintext database came from which account directory.
 
 ---
 
+<a id="safety-and-privacy"></a>
+
 ## 🔐 Safety and Privacy
 
 - Work from copies of Telegram files whenever possible.
@@ -420,6 +440,8 @@ about which plaintext database came from which account directory.
   Telegram or any third-party recovery service.
 
 ---
+
+<a id="troubleshooting"></a>
 
 ## 🩺 Troubleshooting
 
@@ -445,6 +467,8 @@ telegram-exporter decrypt \
 
 ---
 
+<a id="limitations"></a>
+
 ## ⚠️ Limitations
 
 - Does not restore messages into Telegram.
@@ -457,6 +481,8 @@ telegram-exporter decrypt \
   backups, or Telegram cloud export archives.
 
 ---
+
+<a id="faq"></a>
 
 ## ❓ FAQ
 
@@ -489,6 +515,8 @@ metadata.
 
 ---
 
+<a id="versioning"></a>
+
 ## 🔖 Versioning
 
 The canonical version is stored in [`VERSION`](VERSION) and exposed by the CLI:
@@ -508,6 +536,8 @@ Use the helper script when preparing a version bump:
 
 ---
 
+<a id="quality-checks"></a>
+
 ## 🧹 Quality Checks
 
 The CI workflow runs Black, Ruff, and Pylint across Python 3.10 through 3.13.
@@ -520,6 +550,8 @@ pylint src/telegram_message_exporter telegram_exporter.py
 ```
 
 ---
+
+<a id="project-structure"></a>
 
 ## 🗂️ Project Structure
 
@@ -553,6 +585,8 @@ telegram-message-exporter/
 
 ---
 
+<a id="credits"></a>
+
 ## 🙏 Credits
 
 This project builds on community reverse-engineering work. Special thanks to
@@ -561,6 +595,8 @@ This project builds on community reverse-engineering work. Special thanks to
 of Telegram for macOS local key format and Postbox structure.
 
 ---
+
+<a id="contributing"></a>
 
 ## 🤝 Contributing
 
@@ -576,6 +612,8 @@ Please keep recovery and privacy in mind when sharing examples. Do not attach
 private Telegram databases or transcripts to public issues.
 
 ---
+
+<a id="license"></a>
 
 ## 📄 License
 
