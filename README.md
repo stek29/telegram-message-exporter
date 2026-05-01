@@ -1,240 +1,378 @@
 # 💬 Telegram for macOS Message Exporter
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-macOS-111111.svg)](#)
-[![Telegram](https://img.shields.io/badge/Telegram-macOS-2CA5E0.svg)](https://macos.telegram.org/)
-[![CI](https://github.com/soakes/telegram-message-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/soakes/telegram-message-exporter/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://black.readthedocs.io/)
-[![Ruff](https://img.shields.io/badge/lint-ruff-262626.svg)](https://docs.astral.sh/ruff/)
-[![Pylint](https://img.shields.io/badge/lint-pylint-ffcd00.svg)](https://pylint.readthedocs.io/)
+> Offline recovery and transcript export for the native Telegram for macOS app.
 
-A professional, offline recovery and export tool for the **native Telegram for macOS app** (not the cross‑platform Telegram Desktop/Qt app). It decrypts the local `db_sqlite` using `.tempkeyEncrypted` and produces a clean, readable transcript in **HTML**, **Markdown**, or **CSV**.
+[![CI](https://img.shields.io/github/actions/workflow/status/soakes/telegram-message-exporter/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/soakes/telegram-message-exporter/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Platform](https://img.shields.io/badge/platform-macOS-111111.svg?style=flat-square&logo=apple&logoColor=white)](#requirements)
+[![Telegram](https://img.shields.io/badge/Telegram-native%20macOS-2CA5E0.svg?style=flat-square&logo=telegram&logoColor=white)](https://macos.telegram.org/)
+[![License](https://img.shields.io/badge/License-MIT-2EA043.svg?style=flat-square)](LICENSE)
+[![Black](https://img.shields.io/badge/style-black-000000.svg?style=flat-square)](https://black.readthedocs.io/)
+[![Ruff](https://img.shields.io/badge/lint-ruff-46A3FF.svg?style=flat-square)](https://docs.astral.sh/ruff/)
+[![Pylint](https://img.shields.io/badge/lint-pylint-FFCD00.svg?style=flat-square)](https://pylint.readthedocs.io/)
 
-## Table of Contents
+Built for recovery situations where the only remaining copy of a Telegram
+conversation is the encrypted local cache on a Mac. The tool decrypts the local
+`db_sqlite`, understands Telegram's Postbox storage well enough to find peers
+and messages, then writes a readable transcript in HTML, Markdown, or CSV.
 
-- [Overview](#overview)
-- [Motivation & Use Case](#motivation--use-case)
-- [Key Features](#key-features)
-- [What It Does](#what-it-does)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Common Workflows](#common-workflows)
-- [CLI Reference](#cli-reference)
-- [Example Output](#example-output)
-- [Key Paths (macOS)](#key-paths-macos)
-- [Safety & Privacy](#safety--privacy)
-- [Limitations](#limitations)
-- [FAQ](#faq)
-- [Versioning](#versioning)
-- [Updating](#updating)
-- [Quality Checks](#quality-checks)
-- [Project Structure](#project-structure)
-- [Credits](#credits)
-- [Contributing](#contributing)
-- [License](#license)
+This targets the **native Telegram for macOS app** from
+[macos.telegram.org](https://macos.telegram.org/) or the Homebrew `telegram`
+cask. It does **not** target the cross-platform Telegram Desktop/Qt app, iOS
+backups, Android backups, the Mac App Store version, or Telegram's cloud export
+format.
 
----
+**Quick links:** [🚀 Quick Start](#quick-start) · [🔄 How It Works](#how-it-works) · [🧪 Usage](#usage) · [🧰 CLI Reference](#cli-reference) · [🩺 Troubleshooting](#troubleshooting) · [🙏 Credits](#credits)
 
-## Overview
+## 🧭 Table of Contents
 
-Telegram for macOS stores messages locally in an encrypted SQLite database. This tool decrypts the local database, parses Telegram’s Postbox structure, and exports a clean transcript that a non‑technical user can read.
-
-It is designed for **offline recovery** on a Mac where the local cache still exists and has not yet synced a deletion.
-
-Compatibility note: this targets the **native Telegram for macOS** app (macos.telegram.org / Homebrew cask `telegram`). The cross‑platform Telegram Desktop (Qt) app uses a different storage layout.
-
----
-
-## Motivation & Use Case
-
-Telegram does not provide server‑side recovery for deleted chats. In scenarios like accidental deletion, device loss, or audit requirements, the **only remaining source of truth** can be the local encrypted cache on a macOS device.
-
-This project was created after a family conversation was removed with no way to restore it via Telegram’s servers. The local Mac still had the encrypted cache, so this tool was built to recover what remained locally and convert it into a clean, shareable export.
+- [📖 Overview](#overview)
+- [✨ Capabilities](#capabilities)
+- [🔄 How It Works](#how-it-works)
+- [✅ Requirements](#requirements)
+- [🚀 Quick Start](#quick-start)
+- [🧪 Usage](#usage)
+- [🧰 CLI Reference](#cli-reference)
+- [📄 Output Formats](#output-formats)
+- [🗺️ Key Paths](#key-paths)
+- [🔐 Safety and Privacy](#safety-and-privacy)
+- [🩺 Troubleshooting](#troubleshooting)
+- [⚠️ Limitations](#limitations)
+- [❓ FAQ](#faq)
+- [🔖 Versioning](#versioning)
+- [🧹 Quality Checks](#quality-checks)
+- [🗂️ Project Structure](#project-structure)
+- [🙏 Credits](#credits)
+- [🤝 Contributing](#contributing)
+- [📄 License](#license)
 
 ---
 
-## Key Features
+## 📖 Overview
 
-- 🔐 Offline decryption using Telegram’s local key format (dbKey + dbSalt)
-- 🧾 Human‑readable exports with names, timestamps, and link handling
-- ✨ Modern HTML transcript with date jump + back‑to‑top
-- 📊 CSV export for analysis or spreadsheets
-- ⏱️ Date filters for targeted ranges
-- 🧭 Best‑effort peer mapping for clean names
+Telegram for macOS stores local message data in an encrypted SQLite database.
+When a chat has been deleted from Telegram's cloud state, the local cache can be
+the last useful source of evidence, provided it still exists on disk and has
+not been overwritten or synced away.
+
+`telegram-message-exporter` provides a focused recovery path:
+
+- decrypt the local SQLCipher database using `.tempkeyEncrypted`
+- inspect the resulting plaintext SQLite copy
+- list likely peers and contacts
+- export one chat or all decoded messages to a clean transcript
+
+The tool is intentionally offline. It does not call Telegram APIs, restore
+messages back into Telegram, or upload recovered data anywhere.
+
+### First Recovery Checklist
+
+1. Stop using Telegram on the Mac as soon as possible.
+2. Keep the Mac offline if you are trying to preserve a recently deleted chat.
+3. Copy the Telegram key and database to a separate working directory before
+   experimenting.
+4. Install the tool in a virtual environment.
+5. Decrypt to `plaintext.db`.
+6. Run `list-peers` to find the chat you care about.
+7. Export HTML first for reading, then CSV if you need analysis in a
+   spreadsheet.
+8. Store `plaintext.db` and transcript files securely; they contain private
+   message content.
 
 ---
 
-## What It Does
+## ✨ Capabilities
 
-- Decrypts `db_sqlite` using `.tempkeyEncrypted`
-- Extracts messages from the Postbox store
-- Outputs HTML, Markdown, or CSV transcripts
-- Supports date filtering and peer‑specific exports
-
-What it does not do:
-
-- Restore chats back into Telegram
-- Recover media that was never downloaded/cached locally
-- Bypass Telegram passcode without the passcode
-
----
-
-## Requirements
-
-- macOS with Telegram for macOS data present (native app)
-- Python 3.10 or higher (tested on 3.11–3.13)
-- Virtual environment recommended
+- **Offline decryption**: derives SQLCipher keys from Telegram's local
+  `.tempkeyEncrypted` file
+- **Passcode support**: accepts `--passcode` or `TG_LOCAL_PASSCODE` when
+  Telegram Passcode Lock is enabled
+- **Postbox parsing**: handles the native macOS app's key/value Postbox tables
+- **Peer discovery**: searches local peer records so exports can use names
+  instead of raw IDs where possible
+- **Targeted exports**: filters by peer ID, contact name, message limit, start
+  date, and end date
+- **Readable output**: writes styled HTML, Markdown, or CSV with timestamps,
+  speakers, directions, and link handling
+- **Diagnostics**: samples tables and rows when Telegram storage changes or a
+  cache does not match the expected shape
 
 ---
 
-## Installation
+## 🔄 How It Works
+
+The normal recovery flow has two phases: decrypt the database, then export from
+the plaintext copy.
+
+```mermaid
+flowchart TD
+    A[Native Telegram for macOS data] --> B[.tempkeyEncrypted]
+    A --> C[account-*/postbox/db/db_sqlite]
+    B --> D[telegram-exporter decrypt]
+    C --> D
+    D --> E[plaintext.db]
+    E --> F[list-peers]
+    E --> G[diagnose]
+    F --> H[export --peer-id or --contact]
+    G --> H
+    H --> I[HTML transcript]
+    H --> J[Markdown transcript]
+    H --> K[CSV dataset]
+```
+
+The CLI never needs Telegram network access. Everything comes from local files
+that already exist on the Mac.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI as telegram-exporter
+    participant Key as .tempkeyEncrypted
+    participant DB as db_sqlite
+    participant Plain as plaintext.db
+    participant Out as transcript file
+
+    User->>CLI: decrypt --key --db --out plaintext.db
+    CLI->>Key: derive local key candidates
+    CLI->>DB: open encrypted SQLCipher database
+    CLI->>Plain: write plaintext SQLite copy
+    User->>CLI: list-peers --db plaintext.db
+    CLI->>Plain: inspect peer records
+    User->>CLI: export --db plaintext.db --peer-id ...
+    CLI->>Plain: parse messages and peer map
+    CLI->>Out: render HTML, Markdown, or CSV
+```
+
+---
+
+## ✅ Requirements
+
+- macOS with native Telegram for macOS data present
+- Python 3.10 or newer
+- SQLCipher support for the `sqlcipher3` Python package
+- Telegram local passcode, if Passcode Lock was enabled
+- A virtual environment for local installs
+
+On macOS, install SQLCipher first if `sqlcipher3` fails to build:
 
 ```bash
+brew install sqlcipher
+```
+
+---
+
+## 🚀 Quick Start
+
+### 1. Install
+
+From a clone:
+
+```bash
+git clone https://github.com/soakes/telegram-message-exporter.git
+cd telegram-message-exporter
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-If you prefer a requirements file:
-
-```bash
-pip install -r requirements.txt
-```
-
-Install from GitHub (latest):
+Or install the latest revision directly from GitHub:
 
 ```bash
 pip install -U "git+https://github.com/soakes/telegram-message-exporter.git"
 ```
 
-Clone from GitHub:
+### 2. Locate Telegram's database
+
+The native macOS app normally stores its data below:
 
 ```bash
-git clone https://github.com/soakes/telegram-message-exporter.git
-cd telegram-message-exporter
-pip install -e .
+ls "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable"
+ls "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable"/account-*/postbox/db/db_sqlite
 ```
 
----
+You need:
 
-## Quick Start
+- `.tempkeyEncrypted`
+- the matching `account-*/postbox/db/db_sqlite`
 
-### 1) Decrypt the database
+### 3. Decrypt to a working copy
 
 ```bash
 telegram-exporter decrypt \
-  --key ~/Library/Group\ Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted \
-  --db  ~/Library/Group\ Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-*/postbox/db/db_sqlite \
-  --out plaintext.db
+  --key "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" \
+  --db "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" \
+  --out recovery/plaintext.db
 ```
 
-If Passcode Lock is enabled:
+If Telegram Passcode Lock is enabled:
 
 ```bash
 TG_LOCAL_PASSCODE="your-passcode" \
-  telegram-exporter decrypt --key <key> --db <db> --out plaintext.db
+telegram-exporter decrypt \
+  --key "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" \
+  --db "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" \
+  --out recovery/plaintext.db
 ```
 
-### 2) Find the peer ID
+### 4. Find a peer
 
 ```bash
-telegram-exporter list-peers --db plaintext.db --search "Alex"
+telegram-exporter list-peers --db recovery/plaintext.db --search "Alex"
 ```
 
-### 3) Export a transcript
+### 5. Export a transcript
 
 ```bash
 telegram-exporter export \
-  --db plaintext.db \
+  --db recovery/plaintext.db \
   --peer-id 123456789 \
   --me-name "Me" \
   --format html \
-  --out chat_export.html
+  --out recovery/alex.html
 ```
 
 ---
 
-## Common Workflows
+## 🧪 Usage
 
-Export HTML for a specific chat:
-
-```bash
-telegram-exporter export --db plaintext.db --peer-id 123456789 --format html --me-name "Me" --out chat_export.html
-```
-
-Export a date range:
+### Export HTML for one chat
 
 ```bash
 telegram-exporter export \
-  --db plaintext.db \
+  --db recovery/plaintext.db \
+  --peer-id 123456789 \
+  --format html \
+  --me-name "Me" \
+  --out recovery/chat.html
+```
+
+### Export by contact name
+
+```bash
+telegram-exporter export \
+  --db recovery/plaintext.db \
+  --contact "Alex" \
+  --format md \
+  --out recovery/alex.md
+```
+
+If more than one peer matches, the command prints the candidates and asks you to
+rerun with `--peer-id`.
+
+### Export a date range
+
+```bash
+telegram-exporter export \
+  --db recovery/plaintext.db \
   --peer-id 123456789 \
   --start-date 2024-01-01 \
   --end-date 2024-12-31 \
   --format html \
-  --out chat_2024.html
+  --out recovery/chat-2024.html
 ```
 
-Debug decryption profile selection:
+### Export all decoded messages
 
 ```bash
-telegram-exporter decrypt --key <key> --db <db> --out plaintext.db --debug
+telegram-exporter export \
+  --db recovery/plaintext.db \
+  --format csv \
+  --out recovery/all-chats.csv
 ```
 
-Export all chats (large output):
+### Inspect an unfamiliar database
 
 ```bash
-telegram-exporter export --db plaintext.db --format html --out all_chats.html
+telegram-exporter diagnose --db recovery/plaintext.db
+```
+
+Sample a specific table:
+
+```bash
+telegram-exporter diagnose --db recovery/plaintext.db --table t7
+```
+
+### Debug decryption
+
+```bash
+telegram-exporter decrypt \
+  --key /path/to/.tempkeyEncrypted \
+  --db /path/to/db_sqlite \
+  --out recovery/plaintext.db \
+  --debug
 ```
 
 ---
 
-## CLI Reference
+## 🧰 CLI Reference
 
 | Command | Purpose |
 | --- | --- |
-| `decrypt` | Decrypt `db_sqlite` to a plaintext SQLite file |
-| `diagnose` | Inspect tables and sample rows |
-| `list-peers` | Find peer IDs by name fragment |
-| `export` | Export messages to HTML/Markdown/CSV |
+| `decrypt` | Decrypt Telegram's encrypted `db_sqlite` to a plaintext SQLite file |
+| `diagnose` | List tables, columns, and sample rows from a plaintext database |
+| `list-peers` | Find likely peer IDs by name fragment |
+| `export` | Render messages to HTML, Markdown, or CSV |
 
-Common flags:
+### `decrypt`
 
-- `--db` Path to plaintext DB
-- `--key` Path to `.tempkeyEncrypted`
-- `--peer-id` Peer to export
-- `--format` `html`, `md`, or `csv`
-- `--start-date` / `--end-date` Date filtering
-- `--me-name` Label for outgoing messages
-- `--debug` Extra diagnostics (decrypt)
+| Flag | Required | Description |
+| --- | --- | --- |
+| `--key` | yes | Path to `.tempkeyEncrypted` |
+| `--db` | yes | Path to encrypted `db_sqlite` |
+| `--out` | no | Output plaintext DB path, default `plaintext.db` |
+| `--passcode` | no | Telegram local passcode; can also use `TG_LOCAL_PASSCODE` |
+| `--debug` | no | Print key/profile diagnostics |
+
+### `diagnose`
+
+| Flag | Required | Description |
+| --- | --- | --- |
+| `--db` | yes | Path to plaintext SQLite database |
+| `--table` | no | Table to sample; defaults to `t7` when present |
+
+### `list-peers`
+
+| Flag | Required | Description |
+| --- | --- | --- |
+| `--db` | yes | Path to plaintext SQLite database |
+| `--search` | no | Name fragment to filter peers |
+
+### `export`
+
+| Flag | Required | Description |
+| --- | --- | --- |
+| `--db` | yes | Path to plaintext SQLite database |
+| `--contact` | no | Contact name to resolve to a peer |
+| `--peer-id` | no | Numeric peer ID to export |
+| `--table` | no | Override detected message table |
+| `--limit` | no | Maximum number of messages |
+| `--start-date` | no | Start date, `YYYY-MM-DD` or ISO datetime |
+| `--end-date` | no | End date, `YYYY-MM-DD` or ISO datetime |
+| `--format` | no | `html`, `md`, or `csv`; default `md` |
+| `--out` | no | Output path; defaults to `chat_export.<format>` |
+| `--me-name` | no | Display label for outgoing messages; default `Me` |
+| `--show-direction` | no | Append `(in)` or `(out)` labels in Markdown |
 
 ---
 
-## Example Output
+## 📄 Output Formats
 
-### HTML (snippet)
+| Format | Best for | Notes |
+| --- | --- | --- |
+| `html` | Reading and sharing a polished transcript | Includes summary cards, date jump, back-to-top, and link handling |
+| `md` | Archival text, notes, version control | Compact, portable, and easy to diff |
+| `csv` | Analysis in spreadsheets or scripts | Includes date, time, Unix timestamp, direction, speaker, text, peer ID, and author ID |
 
-```html
-<header class="glass header-panel">
-  <div class="brand">
-    <div class="logo">💬</div>
-    <div class="title-area">
-      <h1>Alex Example</h1>
-      <p class="subtitle">Recovery export for Telegram for macOS</p>
-    </div>
-  </div>
-  <div class="badge glass"><span class="dot"></span><span class="text">Ready</span></div>
-</header>
-```
-
-### Markdown (snippet)
+### Markdown snippet
 
 ```markdown
 # Telegram Chat History: Alex Example
 
 **Exported:** 2026-02-04 16:05:12
+
 **Total Messages:** 418
+
+---
 
 ## Wednesday, February 04, 2026
 
@@ -243,7 +381,7 @@ Common flags:
 3h48 is good also
 ```
 
-### CSV (snippet)
+### CSV snippet
 
 ```csv
 date,time,timestamp,direction,speaker,text,peer_id,author_id
@@ -252,62 +390,109 @@ date,time,timestamp,direction,speaker,text,peer_id,author_id
 
 ---
 
-## Key Paths (macOS)
+## 🗺️ Key Paths
 
-Telegram for macOS stores its data here:
+Native Telegram for macOS typically stores recovery-relevant files here:
 
-- `~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/`
-- `.../account-*/postbox/db/db_sqlite`
-- `.../stable/.tempkeyEncrypted`
+```text
+~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/
+├── .tempkeyEncrypted
+└── account-*/
+    └── postbox/
+        └── db/
+            └── db_sqlite
+```
 
-Media cache (if downloaded):
-
-- `.../account-*/files/`
-
----
-
-## Safety & Privacy
-
-- 🔌 Keep the Mac offline during recovery to avoid sync deletions
-- 🧊 Media is only recoverable if it was cached locally
-- 🧪 If decryption fails, retry with `--debug` and verify key path
+The `account-*` directory must match the database you are decrypting. If there
+are multiple accounts, try `list-peers` after decrypting each one and keep notes
+about which plaintext database came from which account directory.
 
 ---
 
-## Limitations
+## 🔐 Safety and Privacy
 
-- 🔒 Requires the local passcode if Passcode Lock is enabled
-- ☁️ Cannot restore or re‑upload chats to Telegram servers
-- 🗂️ Attachments only appear if they were previously cached on the Mac
-- 🧩 Some newer Telegram message types may not fully decode
-
----
-
-## FAQ
-
-**Can this restore the chat inside Telegram?**  
-No. This tool exports a transcript; it does not re‑insert messages back into Telegram.
-
-**Why do I only see some attachments?**  
-Only files that were downloaded and cached locally can be recovered.
-
-**What if I get “file is not a database”?**  
-The key and DB are mismatched, or Passcode Lock is enabled without the passcode.
-
-**Does it work with Telegram Desktop (Qt) or mobile backups?**  
-No. This targets the native Telegram for macOS app and its local storage layout.
+- Work from copies of Telegram files whenever possible.
+- Keep the Mac offline during time-sensitive recovery to avoid sync changes.
+- Treat `plaintext.db`, HTML, Markdown, and CSV outputs as sensitive private
+  data.
+- Delete or encrypt intermediate files when recovery work is complete.
+- The tool reads local files and writes local outputs only; it does not contact
+  Telegram or any third-party recovery service.
 
 ---
 
-## Versioning
+## 🩺 Troubleshooting
 
-The canonical version is stored in `VERSION` and exposed via:
+| Symptom | What to check |
+| --- | --- |
+| `Key file not found` | Confirm the `.tempkeyEncrypted` path and quote paths containing spaces |
+| `Database file not found` | Confirm the selected `account-*` directory has `postbox/db/db_sqlite` |
+| `Failed to decrypt database` | Verify the key and DB belong to the same Telegram account; pass `--passcode` if Passcode Lock was enabled |
+| `file is not a database` | Usually a mismatched key/database pair or an unsupported SQLCipher profile |
+| `No peer records found` | Run `diagnose` and confirm this is the native macOS Telegram database |
+| `No messages found with the current filters` | Remove date filters, confirm `--peer-id`, or try exporting all decoded messages |
+| `sqlcipher3` install fails | Install SQLCipher with Homebrew, then reinstall the package in a clean virtual environment |
+
+For decryption problems, rerun with `--debug`:
+
+```bash
+telegram-exporter decrypt \
+  --key /path/to/.tempkeyEncrypted \
+  --db /path/to/db_sqlite \
+  --out recovery/plaintext.db \
+  --debug
+```
+
+---
+
+## ⚠️ Limitations
+
+- Does not restore messages into Telegram.
+- Does not bypass a Telegram local passcode; you need the passcode.
+- Does not recover messages that no longer exist in the local cache.
+- Does not download content from Telegram servers.
+- Does not currently extract media files from Telegram's file cache.
+- Some newer or uncommon Telegram message payloads may only partially decode.
+- Does not support Telegram Desktop/Qt, the Mac App Store version, mobile
+  backups, or Telegram cloud export archives.
+
+---
+
+## ❓ FAQ
+
+**Can this restore a deleted chat inside Telegram?**
+No. It exports a transcript from local data; it does not write messages back to
+Telegram.
+
+**Should I use the original Telegram database directly?**
+The command can read it, but for recovery work it is safer to copy the key and
+database into a separate working directory and decrypt from that copy.
+
+**Why does this only support Telegram for macOS?**
+The native macOS app uses a different storage layout from Telegram Desktop/Qt
+and mobile clients. This project is built around the native app's local
+Postbox/SQLCipher data.
+
+**Does it work with the Mac App Store version?**
+No. This currently targets the direct download/Homebrew build from
+macos.telegram.org. The Mac App Store version uses a different app packaging and
+storage setup, so it is outside the supported recovery path.
+
+**Can it recover photos, videos, or documents?**
+Not currently. The exporter focuses on decoded message text and transcript
+metadata.
+
+---
+
+## 🔖 Versioning
+
+The canonical version is stored in [`VERSION`](VERSION) and exposed by the CLI:
 
 ```bash
 telegram-exporter --version
 ```
 
-Version bump helper:
+Use the helper script when preparing a version bump:
 
 ```bash
 ./scripts/bump_version.py patch
@@ -318,71 +503,76 @@ Version bump helper:
 
 ---
 
-## Updating
+## 🧹 Quality Checks
 
-If installed from GitHub:
-
-```bash
-pip install -U "git+https://github.com/soakes/telegram-message-exporter.git"
-```
-
-If installed from a local clone:
+The CI workflow runs Black, Ruff, and Pylint across Python 3.10 through 3.13.
 
 ```bash
-git pull
-pip install -e .
-```
-
----
-
-## Quality Checks
-
-```bash
-black src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
+pip install black ruff pylint
+black --check src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
 ruff check src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
 pylint src/telegram_message_exporter telegram_exporter.py
 ```
 
 ---
 
-## Project Structure
+## 🗂️ Project Structure
 
-```
+```text
 telegram-message-exporter/
-├── pyproject.toml                     # Packaging metadata + CLI entrypoint
-├── telegram_exporter.py               # Convenience wrapper (no install)
+├── .github/
+│   ├── dependabot.yml                 # Dependency update schedule
+│   └── workflows/
+│       └── ci.yml                     # Python lint matrix
+├── pyproject.toml                     # Packaging metadata and CLI entrypoint
+├── telegram_exporter.py               # Convenience wrapper for source checkouts
 ├── scripts/
 │   └── bump_version.py                # Version helper
 ├── src/
 │   └── telegram_message_exporter/
-│       ├── __init__.py                # Package entrypoint
+│       ├── __init__.py                # Version metadata
 │       ├── __main__.py                # python -m entrypoint
-│       ├── cli.py                     # Argument parsing + commands
-│       ├── crypto.py                  # SQLCipher + tempkey handling
-│       ├── db.py                      # DB heuristics + message extraction
-│       ├── exporters.py               # HTML / Markdown / CSV
-│       ├── postbox.py                 # Postbox parsing utilities
+│       ├── cli.py                     # Argument parsing and commands
+│       ├── crypto.py                  # SQLCipher and tempkey handling
+│       ├── db.py                      # DB heuristics and message extraction
+│       ├── exporters.py               # HTML, Markdown, and CSV renderers
+│       ├── hashing.py                 # MurmurHash helper
 │       ├── models.py                  # Message data model
-│       ├── utils.py                   # Date + link helpers
-│       └── hashing.py                 # Murmur3 helper
-├── requirements.txt                   # Python dependencies
+│       ├── postbox.py                 # Postbox parsing utilities
+│       └── utils.py                   # Date parsing and link helpers
+├── requirements.txt                   # Runtime dependencies
+├── VERSION                            # Canonical package version
+├── LICENSE
 └── README.md
 ```
 
 ---
 
-## Credits
+## 🙏 Credits
 
-This project builds on community reverse‑engineering work. Special thanks to **[@stek29](https://github.com/stek29)** for the original research and [reference implementation](https://gist.github.com/stek29/8a7ac0e673818917525ec4031d77a713) of Telegram for macOS local key format and Postbox structure. This tool extends those ideas into a polished, end‑user‑friendly CLI and export workflow.
-
----
-
-## Contributing
-
-For enhancements or alternate export styles, feel free to open a PR (or fork and submit one). We’ll review and merge solid improvements—this repo is meant to be a good base to build on.
+This project builds on community reverse-engineering work. Special thanks to
+**[@stek29](https://github.com/stek29)** for the original research and
+[reference implementation](https://gist.github.com/stek29/8a7ac0e673818917525ec4031d77a713)
+of Telegram for macOS local key format and Postbox structure.
 
 ---
 
-## License
+## 🤝 Contributing
 
-This project is licensed under the MIT License. See `LICENSE` for details.
+Issues and pull requests are welcome, especially for:
+
+- additional Telegram for macOS storage variants
+- safer recovery workflows
+- better Postbox decoding
+- export formatting improvements
+- tests around real-world cache shapes
+
+Please keep recovery and privacy in mind when sharing examples. Do not attach
+private Telegram databases or transcripts to public issues.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE) for
+details.
