@@ -196,13 +196,14 @@ pip install -U "git+https://github.com/soakes/telegram-message-exporter.git"
 The native macOS app normally stores its data below:
 
 ```bash
-ls "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable"
-ls "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable"/account-*/postbox/db/db_sqlite
+TELEGRAM_STABLE="$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable"
+ls -la "$TELEGRAM_STABLE"
+ls "$TELEGRAM_STABLE"/account-*/postbox/db/db_sqlite
 ```
 
 You need:
 
-- `.tempkeyEncrypted`
+- `.tempkeyEncrypted`, which is hidden from plain `ls` because it starts with `.`
 - the matching `account-*/postbox/db/db_sqlite`
 
 ### 3. Decrypt to a working copy
