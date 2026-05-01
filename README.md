@@ -495,10 +495,10 @@ telegram-exporter --version
 Use the helper script when preparing a version bump:
 
 ```bash
-./scripts/bump_version.py patch
-./scripts/bump_version.py minor
-./scripts/bump_version.py major
-./scripts/bump_version.py --set 1.2.3
+.github/scripts/bump_version.py patch
+.github/scripts/bump_version.py minor
+.github/scripts/bump_version.py major
+.github/scripts/bump_version.py --set 1.2.3
 ```
 
 ---
@@ -509,8 +509,8 @@ The CI workflow runs Black, Ruff, and Pylint across Python 3.10 through 3.13.
 
 ```bash
 pip install black ruff pylint
-black --check src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
-ruff check src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
+black --check src/telegram_message_exporter telegram_exporter.py .github/scripts/bump_version.py
+ruff check src/telegram_message_exporter telegram_exporter.py .github/scripts/bump_version.py
 pylint src/telegram_message_exporter telegram_exporter.py
 ```
 
@@ -522,12 +522,12 @@ pylint src/telegram_message_exporter telegram_exporter.py
 telegram-message-exporter/
 ├── .github/
 │   ├── dependabot.yml                 # Dependency update schedule
+│   ├── scripts/
+│   │   └── bump_version.py            # Version helper
 │   └── workflows/
 │       └── ci.yml                     # Python lint matrix
 ├── pyproject.toml                     # Packaging metadata and CLI entrypoint
 ├── telegram_exporter.py               # Convenience wrapper for source checkouts
-├── scripts/
-│   └── bump_version.py                # Version helper
 ├── src/
 │   └── telegram_message_exporter/
 │       ├── __init__.py                # Version metadata

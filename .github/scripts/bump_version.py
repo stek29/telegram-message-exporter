@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 from typing import Tuple
 
-VERSION_PATH = Path(__file__).resolve().parents[1] / "VERSION"
+VERSION_PATH = Path(__file__).resolve().parents[2] / "VERSION"
 
 
 def parse_version(value: str) -> Tuple[int, int, int]:

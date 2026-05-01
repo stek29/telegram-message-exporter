@@ -22,8 +22,8 @@ jobs:
           pip install -e .
           pip install black ruff pylint
       - name: Black
-        run: black --check src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
+        run: black --check src/telegram_message_exporter telegram_exporter.py .github/scripts/bump_version.py
       - name: Ruff
-        run: ruff check src/telegram_message_exporter telegram_exporter.py scripts/bump_version.py
+        run: ruff check src/telegram_message_exporter telegram_exporter.py .github/scripts/bump_version.py
       - name: Pylint
         run: pylint src/telegram_message_exporter telegram_exporter.py
