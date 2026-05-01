@@ -460,25 +460,30 @@ telegram-exporter decrypt \
 
 ## ❓ FAQ
 
-**Can this restore a deleted chat inside Telegram?**
+### Can this restore a deleted chat inside Telegram?
+
 No. It exports a transcript from local data; it does not write messages back to
 Telegram.
 
-**Should I use the original Telegram database directly?**
+### Should I use the original Telegram database directly?
+
 The command can read it, but for recovery work it is safer to copy the key and
 database into a separate working directory and decrypt from that copy.
 
-**Why does this only support Telegram for macOS?**
+### Why does this only support Telegram for macOS?
+
 The native macOS app uses a different storage layout from Telegram Desktop/Qt
 and mobile clients. This project is built around the native app's local
 Postbox/SQLCipher data.
 
-**Does it work with the Mac App Store version?**
+### Does it work with the Mac App Store version?
+
 No. This currently targets the direct download/Homebrew build from
 macos.telegram.org. The Mac App Store version uses a different app packaging and
 storage setup, so it is outside the supported recovery path.
 
-**Can it recover photos, videos, or documents?**
+### Can it recover photos, videos, or documents?
+
 Not currently. The exporter focuses on decoded message text and transcript
 metadata.
 
