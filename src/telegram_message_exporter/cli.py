@@ -33,6 +33,7 @@ from .postbox import (
     list_peers_postbox,
     load_peer_map,
 )
+from .schema import PostboxTable
 from .utils import parse_date_input
 
 
@@ -75,7 +76,8 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
     for table in tables:
         print(f"  - {table}")
 
-    table = args.table or ("t7" if "t7" in tables else None)
+    message_table = PostboxTable.MESSAGE_HISTORY.sqlite_name
+    table = args.table or (message_table if message_table in tables else None)
     if table:
         print("\nColumns:")
         for col in table_columns(conn, table):
@@ -97,8 +99,9 @@ def cmd_list_peers(args: argparse.Namespace) -> None:
 
     conn = sqlite3.connect(str(db_path))
     results = []
-    if "t2" in list_tables(conn) and is_postbox_kv_table(conn, "t2"):
-        rows = conn.execute("SELECT key, value FROM t2").fetchall()
+    peer_table = PostboxTable.PEER.sqlite_name
+    if peer_table in list_tables(conn) and is_postbox_kv_table(conn, peer_table):
+        rows = conn.execute(f"SELECT key, value FROM {peer_table}").fetchall()
         results = list_peers_postbox(rows, args.search)
     else:
         results = search_peers(conn, args.search)
@@ -133,7 +136,8 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     peer_map: Optional[dict[int, str]] = None
     if is_postbox_kv_table(conn, table):
-        peer_rows = conn.execute("SELECT key, value FROM t2").fetchall()
+        peer_table = PostboxTable.PEER.sqlite_name
+        peer_rows = conn.execute(f"SELECT key, value FROM {peer_table}").fetchall()
         peer_map = load_peer_map(peer_rows)
         rows = conn.execute(f"SELECT key, value FROM {table} ORDER BY key").fetchall()
         messages = iter_postbox_messages(

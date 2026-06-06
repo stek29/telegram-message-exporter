@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from .models import Message
+from .schema import PostboxTable
 from .utils import parse_timestamp
 
 
@@ -33,8 +34,9 @@ def detect_column(cols: list[tuple], names: Iterable[str]) -> Optional[str]:
 def detect_message_table(conn: sqlite3.Connection) -> str:
     """Best-effort detection of a messages table."""
     tables = list_tables(conn)
-    if "t7" in tables:
-        return "t7"
+    message_table = PostboxTable.MESSAGE_HISTORY.sqlite_name
+    if message_table in tables:
+        return message_table
     if "messages" in tables:
         return "messages"
 

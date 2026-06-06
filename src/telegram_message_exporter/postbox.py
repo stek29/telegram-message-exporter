@@ -11,6 +11,14 @@ from typing import Any, Iterable, Optional
 
 from .hashing import murmur_hash
 from .models import Message
+from .schema import (
+    POSTBOX_FIELD_ALIASES,
+    POSTBOX_MEDIA_HELPER_TYPES,
+    POSTBOX_MEDIA_TYPES,
+    POSTBOX_MESSAGE_ATTRIBUTE_TYPES,
+    PostboxTable,
+    TelegramMediaActionType,
+)
 
 
 class ByteReader:
@@ -94,6 +102,12 @@ class FwdInfoFlags(enum.IntFlag):
     FLAGS = 1 << 5
 
 
+class MessageForwardFlags(enum.IntFlag):
+    """Flags stored inside decoded forward information."""
+
+    IS_IMPORTED = 1 << 0
+
+
 class MessageFlags(enum.IntFlag):
     """Bit flags describing message direction and state."""
 
@@ -105,6 +119,9 @@ class MessageFlags(enum.IntFlag):
     CAN_BE_GROUPED_INTO_FEED = 64
     WAS_SCHEDULED = 128
     COUNTED_AS_INCOMING = 256
+    COPY_PROTECTED = 512
+    IS_FORUM_TOPIC = 1024
+    REACTIONS_ARE_POSSIBLE = 2048
 
 
 class MessageTags(enum.IntFlag):
@@ -121,6 +138,25 @@ class MessageTags(enum.IntFlag):
     PHOTO = 1 << 8
     VIDEO = 1 << 9
     PINNED = 1 << 10
+    UNSEEN_REACTION = 1 << 11
+    VOICE = 1 << 12
+    ROUND_VIDEO = 1 << 13
+    POLLS = 1 << 14
+    UNSEEN_POLL_VOTE = 1 << 15
+
+
+class GlobalMessageTags(enum.IntFlag):
+    """Global message tag categories."""
+
+    CALLS = 1 << 0
+    MISSED_CALLS = 1 << 1
+
+
+class LocalMessageTags(enum.IntFlag):
+    """Device-local message tag categories."""
+
+    OUTGOING_LIVE_LOCATION = 1 << 0
+    OUTGOING_DELIVERED_TO_SERVER = 1 << 1
 
 
 @dataclass(frozen=True)
@@ -149,6 +185,23 @@ class MessageIndex:
         )
 
 
+class MediaEntryType(enum.IntEnum):
+    """Storage mode used by entries in the Postbox message-media table."""
+
+    DIRECT = 0
+    MESSAGE_REFERENCE = 1
+
+
+@dataclass(frozen=True)
+class MediaEntry:
+    """Decoded value from the Postbox message-media table."""
+
+    entry_type: MediaEntryType
+    media: Optional[Any] = None
+    message_index: Optional[MessageIndex] = None
+    reference_count: Optional[int] = None
+
+
 class PostboxDecoder:
     """Decoder for Postbox key/value payloads."""
 
@@ -159,6 +212,11 @@ class PostboxDecoder:
         """Register a type hash decoder for Postbox objects."""
         cls.registry[murmur_hash(target.__name__.encode("utf-8"))] = target
         return target
+
+    @classmethod
+    def register_named_decoder(cls, type_name: str, target: type) -> None:
+        """Register a decoder under an explicit Swift type name."""
+        cls.registry[murmur_hash(type_name.encode("utf-8"))] = target
 
     class ValueType(enum.Enum):
         """Postbox value encoding types."""
@@ -258,13 +316,46 @@ class PostboxDecoder:
         return [(self._read_object(), self._read_object()) for _ in range(length)]
 
 
+@dataclass(frozen=True)
+class PostboxObject:
+    """Named Postbox object whose fields are retained without interpretation."""
+
+    type_name: str
+    payload: dict[str, Any]
+
+    @property
+    def fields(self) -> dict[str, Any]:
+        """Return payload fields with current Telegram source names."""
+        aliases = POSTBOX_FIELD_ALIASES.get(self.type_name, {})
+        fields = {aliases.get(key, key): value for key, value in self.payload.items()}
+        for field_name in ("file_id", "image_id", "webpage_id"):
+            value = fields.get(field_name)
+            if isinstance(value, bytes) and len(value) == 12:
+                fields[field_name] = struct.unpack("<iq", value)
+        return fields
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a serializable representation."""
+        return {
+            "type": self.type_name,
+            "payload": self.payload,
+            "fields": self.fields,
+        }
+
+
+def _named_object_decoder(type_name: str):
+    def decode(decoder: PostboxDecoder) -> PostboxObject:
+        payload = {key: val for key, _, val in decoder.iter_kv()}
+        return PostboxObject(type_name=type_name, payload=payload)
+
+    return decode
+
+
+@PostboxDecoder.register_decoder
 class TelegramMediaAction:
-    """Simple placeholder for action media types."""
+    """Decoded Telegram service-message action."""
 
-    class Type(enum.Enum):
-        """Known action types."""
-
-        UNKNOWN = 0
+    Type = TelegramMediaActionType
 
     def __init__(self, decoder: PostboxDecoder) -> None:
         raw = {key: val for key, _, val in decoder.iter_kv()}
@@ -278,7 +369,45 @@ class TelegramMediaAction:
 
     def as_dict(self) -> dict[str, Any]:
         """Return a serializable representation of the action."""
-        return {"type": self.type.name, "payload": self.payload}
+        return {
+            "type": self.type.name,
+            "raw_type": int(self.type),
+            "payload": self.payload,
+        }
+
+
+for _type_name in (
+    *POSTBOX_MEDIA_TYPES,
+    *POSTBOX_MEDIA_HELPER_TYPES,
+    *POSTBOX_MESSAGE_ATTRIBUTE_TYPES,
+):
+    if _type_name != TelegramMediaAction.__name__:
+        PostboxDecoder.register_named_decoder(
+            _type_name, _named_object_decoder(_type_name)
+        )
+
+
+def read_media_entry(payload: bytes) -> MediaEntry:
+    """Decode a value from Postbox table t6 (message media)."""
+    reader = ByteReader(io.BytesIO(payload))
+    entry_type = MediaEntryType(reader.read_int8())
+    if entry_type == MediaEntryType.DIRECT:
+        media = PostboxDecoder(reader.read_bytes()).decode_root_object()
+        reference_count = reader.read_int32()
+        return MediaEntry(
+            entry_type=entry_type,
+            media=media,
+            reference_count=reference_count,
+        )
+
+    peer_id = reader.read_int64()
+    namespace = reader.read_int32()
+    message_id = reader.read_int32()
+    timestamp = reader.read_int32()
+    return MediaEntry(
+        entry_type=entry_type,
+        message_index=MessageIndex(peer_id, namespace, message_id, timestamp),
+    )
 
 
 def read_intermediate_fwd_info(reader: ByteReader) -> Optional[dict[str, Any]]:
@@ -302,7 +431,11 @@ def read_intermediate_fwd_info(reader: ByteReader) -> Optional[dict[str, Any]]:
 
     signature = reader.read_str() if FwdInfoFlags.SIGNATURE in info_flags else None
     psa_type = reader.read_str() if FwdInfoFlags.PSA_TYPE in info_flags else None
-    flags = reader.read_int32() if FwdInfoFlags.FLAGS in info_flags else None
+    flags = (
+        MessageForwardFlags(reader.read_int32())
+        if FwdInfoFlags.FLAGS in info_flags
+        else None
+    )
 
     return {
         "author": author_id,
@@ -324,22 +457,33 @@ def read_intermediate_message(payload: bytes) -> Optional[dict[str, Any]]:
     if message_type != 0:
         return None
 
-    reader.read_uint32()  # stableId
-    reader.read_uint32()  # stableVer
+    stable_id = reader.read_uint32()
+    stable_version = reader.read_uint32()
 
     data_flags = MessageDataFlags(reader.read_uint8())
+    globally_unique_id = None
     if MessageDataFlags.GLOBALLY_UNIQUE_ID in data_flags:
-        reader.read_int64()
+        globally_unique_id = reader.read_int64()
+
+    global_tags = GlobalMessageTags()
     if MessageDataFlags.GLOBAL_TAGS in data_flags:
-        reader.read_uint32()
+        global_tags = GlobalMessageTags(reader.read_uint32())
+
+    grouping_key = None
     if MessageDataFlags.GROUPING_KEY in data_flags:
-        reader.read_int64()
+        grouping_key = reader.read_int64()
+
+    group_info_stable_id = None
     if MessageDataFlags.GROUP_INFO in data_flags:
-        reader.read_uint32()
+        group_info_stable_id = reader.read_uint32()
+
+    local_tags = LocalMessageTags()
     if MessageDataFlags.LOCAL_TAGS in data_flags:
-        reader.read_uint32()
+        local_tags = LocalMessageTags(reader.read_uint32())
+
+    thread_id = None
     if MessageDataFlags.THREAD_ID in data_flags:
-        reader.read_int64()
+        thread_id = reader.read_int64()
 
     flags = MessageFlags(reader.read_uint32())
     tags = MessageTags(reader.read_uint32())
@@ -353,12 +497,16 @@ def read_intermediate_message(payload: bytes) -> Optional[dict[str, Any]]:
     text = reader.read_str()
 
     attributes_count = reader.read_int32()
+    attributes = []
     for _ in range(attributes_count):
-        _ = reader.read_bytes()
+        attribute_data = reader.read_bytes()
+        attributes.append(PostboxDecoder(attribute_data).decode_root_object())
 
     embedded_media_count = reader.read_int32()
+    embedded_media = []
     for _ in range(embedded_media_count):
-        _ = reader.read_bytes()
+        media_data = reader.read_bytes()
+        embedded_media.append(PostboxDecoder(media_data).decode_root_object())
 
     referenced_media_ids = []
     for _ in range(reader.read_int32()):
@@ -366,13 +514,29 @@ def read_intermediate_message(payload: bytes) -> Optional[dict[str, Any]]:
         message_id = reader.read_int64()
         referenced_media_ids.append((namespace, message_id))
 
+    custom_tags = []
+    if reader.buf.tell() < len(payload):
+        for _ in range(reader.read_int32()):
+            custom_tags.append(reader.read_bytes())
+
     return {
+        "stable_id": stable_id,
+        "stable_version": stable_version,
+        "globally_unique_id": globally_unique_id,
+        "global_tags": global_tags,
+        "grouping_key": grouping_key,
+        "group_info_stable_id": group_info_stable_id,
+        "local_tags": local_tags,
+        "thread_id": thread_id,
         "flags": flags,
         "tags": tags,
         "author_id": author_id,
         "fwd": fwd_info,
         "text": text,
+        "attributes": attributes,
+        "embedded_media": embedded_media,
         "referenced_media_ids": referenced_media_ids,
+        "custom_tags": custom_tags,
     }
 
 
@@ -462,7 +626,7 @@ def list_peers_postbox(
             continue
         if term and term.lower() not in display.lower():
             continue
-        results.append(("t2", peer_id, display))
+        results.append((PostboxTable.PEER.sqlite_name, peer_id, display))
     return results
 
 
