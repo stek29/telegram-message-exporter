@@ -36,9 +36,10 @@ from .postbox import (
     PostboxMediaResolver,
     attachment_referenced_peer_ids,
     iter_postbox_messages,
-    resolve_reply_previews,
     list_peers_postbox,
+    load_account_peer_id,
     load_peer_map,
+    resolve_reply_previews,
 )
 from .schema import PostboxTable
 from .utils import parse_date_input, resolve_timezone
@@ -115,6 +116,43 @@ def cmd_list_peers(args: argparse.Namespace) -> None:
     print("Possible peers:")
     for table_name, peer_id, display in results:
         print(f"  {peer_id}  {display}  (table={table_name})")
+
+
+def cmd_info(args: argparse.Namespace) -> None:
+    """Show information about the current Telegram account."""
+    _, conn = _open_for_reading(args)
+    tables = list_tables(conn)
+    metadata_table = PostboxTable.METADATA.sqlite_name
+    peer_table = PostboxTable.PEER.sqlite_name
+    if metadata_table not in tables or not is_postbox_kv_table(conn, metadata_table):
+        conn.close()
+        raise SystemExit("Postbox metadata table t0 was not found.")
+    if peer_table not in tables or not is_postbox_kv_table(conn, peer_table):
+        conn.close()
+        raise SystemExit("Postbox peer table t2 was not found.")
+
+    peer_id = load_account_peer_id(conn)
+    if peer_id is None:
+        conn.close()
+        raise SystemExit("Could not find an authorized account peer ID in t0.")
+
+    peer_map = load_peer_map(iter_postbox_peer_rows(conn, peer_table, {peer_id}))
+    conn.close()
+    peer = peer_map.get(peer_id)
+    if peer is None:
+        raise SystemExit(f"Could not decode current account peer {peer_id} from t2.")
+
+    if args.format != "text":
+        raise SystemExit(f"Unknown info format: {args.format}")
+
+    print("Current account:")
+    print(f"  Peer ID: {peer_id}")
+    print(f"  Name: {peer.name}")
+    if peer.username:
+        print(f"  Username: @{peer.username}")
+    if peer.phone:
+        phone = peer.phone if peer.phone.startswith("+") else f"+{peer.phone}"
+        print(f"  Phone: {phone}")
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -358,6 +396,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_peers.add_argument("--search", help="Name fragment to search")
     list_peers.set_defaults(func=cmd_list_peers)
+
+    info = subparsers.add_parser("info", help="Show current account information")
+    info.add_argument("--db", required=True, help="Path to Telegram DB")
+    info.add_argument(
+        "--key",
+        help="Path to .tempkeyEncrypted (treat --db as encrypted SQLCipher)",
+    )
+    info.add_argument(
+        "--passcode",
+        help="Telegram local passcode (or set TG_LOCAL_PASSCODE); ignored for plaintext DBs",
+    )
+    info.add_argument(
+        "--format",
+        default="text",
+        choices=["text"],
+        help="Output format (text)",
+    )
+    info.set_defaults(func=cmd_info)
 
     export = subparsers.add_parser(
         "export", help="Export messages to Markdown/HTML/CSV"

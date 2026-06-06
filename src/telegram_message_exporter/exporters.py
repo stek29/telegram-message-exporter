@@ -2329,21 +2329,32 @@ def _csv_name_color(
     return info.name_color
 
 
-def _json_default(obj: object) -> object:
-    """JSON encoder fallback for Postbox-decoded values that aren't directly serializable.
+def _csv_safe_metadata(value: object) -> object:
+    """Recursively drop non-JSON-serializable values from CSV metadata.
 
-    Used by ``render_csv`` to convert ``bytes`` (Postbox ``INT64_ARRAY`` /
-    ``BYTES`` blobs), ``datetime`` instances, and ``Path`` objects into
-    JSON-friendly representations. Returns ``repr(obj)`` for anything else
-    so we never lose the value silently.
+    Action attachments carry the raw Postbox payload (nested
+    ``PostboxObject`` instances, ``INT64_ARRAY`` / ``BYTES`` blobs) under
+    ``metadata["payload"]``. That data is useful for in-process rendering
+    but should not appear in the CSV column — it isn't tabular and isn't
+    JSON-serializable. This walker returns a copy with:
+
+    * ``PostboxObject`` instances replaced with a ``{"@type": name}``
+      marker (just enough to identify them, none of the heavy fields).
+    * ``bytes`` / ``bytearray`` replaced with their hex string.
+    * any other type left as-is if JSON-serializable, otherwise
+      ``repr(obj)`` so we never silently lose the value.
     """
-    if isinstance(obj, (bytes, bytearray)):
-        return obj.hex()
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, Path):
-        return str(obj)
-    return repr(obj)
+    if isinstance(value, dict):
+        return {key: _csv_safe_metadata(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_csv_safe_metadata(item) for item in value]
+    from telegram_message_exporter.postbox import PostboxObject
+
+    if isinstance(value, PostboxObject):
+        return {"@type": value.type_name}
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    return value
 
 
 def _csv_reply_info(

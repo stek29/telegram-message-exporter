@@ -127,6 +127,16 @@ class GroupCreatorChangeKind(enum.IntEnum):
     APPLIED = 1
 
 
+class PostboxMetadataKey(enum.IntEnum):
+    """Keys stored in Telegram's Postbox metadata table (t0)."""
+
+    USER_VERSION = 1
+    STATE = 2
+    TRANSACTION_STATE_VERSION = 3
+    MASTER_CLIENT_ID = 4
+    REMOTE_CONTACT_COUNT = 6
+
+
 class PostboxTable(enum.IntEnum):
     """Postbox SQLite table identifiers from Telegram-iOS."""
 

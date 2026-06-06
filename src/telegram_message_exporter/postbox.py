@@ -18,6 +18,7 @@ from .schema import (
     POSTBOX_MEDIA_HELPER_TYPES,
     POSTBOX_MEDIA_TYPES,
     POSTBOX_MESSAGE_ATTRIBUTE_TYPES,
+    PostboxMetadataKey,
     PostboxTable,
     TelegramMediaActionType,
 )
@@ -2634,6 +2635,27 @@ def load_peer_map(rows: Iterable[tuple[bytes, bytes]]) -> dict[int, PeerInfo]:
         if info is not None:
             peer_map[peer_id] = info
     return peer_map
+
+
+def load_account_peer_id(conn) -> Optional[int]:
+    """Load the authorized account peer id from Postbox metadata table t0."""
+    metadata_table = PostboxTable.METADATA.sqlite_name
+    row = conn.execute(
+        f"SELECT value FROM {metadata_table} WHERE key = ?",
+        (PostboxMetadataKey.STATE,),
+    ).fetchone()
+    if row is None or not isinstance(row[0], (bytes, bytearray)):
+        return None
+    try:
+        state = PostboxDecoder(row[0]).decode_root_object()
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    peer_id = state.get("peerId")
+    if isinstance(peer_id, int) and not isinstance(peer_id, bool) and peer_id > 0:
+        return peer_id
+    return None
 
 
 def attachment_referenced_peer_ids(attachment: Attachment) -> list[int]:
