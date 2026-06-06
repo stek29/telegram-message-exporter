@@ -2257,27 +2257,7 @@ def iter_postbox_messages(
         incoming = MessageFlags.INCOMING in msg["flags"]
         timestamp = datetime.fromtimestamp(idx.timestamp) if idx.timestamp else None
         raw_forward_info = msg.get("fwd")
-        forward_info = None
-        if raw_forward_info is not None:
-            forward_timestamp = raw_forward_info.get("date")
-            forward_flags = raw_forward_info.get("flags")
-            forward_info = ForwardInfo(
-                author_id=raw_forward_info.get("author"),
-                source_id=raw_forward_info.get("src_id"),
-                source_message_peer_id=raw_forward_info.get("src_msg_peer"),
-                source_message_namespace=raw_forward_info.get("src_msg_ns"),
-                source_message_id=raw_forward_info.get("src_msg_id"),
-                date=(
-                    datetime.fromtimestamp(forward_timestamp, tz=timezone.utc)
-                    if forward_timestamp
-                    else None
-                ),
-                author_signature=raw_forward_info.get("signature"),
-                psa_type=raw_forward_info.get("psa_type"),
-                is_imported=bool(
-                    forward_flags and MessageForwardFlags.IS_IMPORTED in forward_flags
-                ),
-            )
+        forward_info = _build_forward_info(raw_forward_info)
         messages.append(
             Message(
                 timestamp=timestamp,
@@ -2339,6 +2319,36 @@ def _attachment_meta_string(attachment: Attachment) -> str:
                 question = question[:57] + "…"
             parts.append(question)
     return " · ".join(parts)
+
+
+def _build_forward_info(raw: Optional[dict[str, Any]]) -> Optional[ForwardInfo]:
+    """Convert a raw ``read_intermediate_fwd_info`` dict to a ``ForwardInfo``.
+
+    Returns ``None`` for the no-forward case. Centralised so the main
+    message loop and ``resolve_reply_previews`` (which needs the target
+    message's forward info) both decode the same shape.
+    """
+    if raw is None:
+        return None
+    forward_timestamp = raw.get("date")
+    forward_flags = raw.get("flags")
+    return ForwardInfo(
+        author_id=raw.get("author"),
+        source_id=raw.get("src_id"),
+        source_message_peer_id=raw.get("src_msg_peer"),
+        source_message_namespace=raw.get("src_msg_ns"),
+        source_message_id=raw.get("src_msg_id"),
+        date=(
+            datetime.fromtimestamp(forward_timestamp, tz=timezone.utc)
+            if forward_timestamp
+            else None
+        ),
+        author_signature=raw.get("signature"),
+        psa_type=raw.get("psa_type"),
+        is_imported=bool(
+            forward_flags and MessageForwardFlags.IS_IMPORTED in forward_flags
+        ),
+    )
 
 
 def _attachment_kind_label(attachment: Attachment) -> str:
@@ -2450,6 +2460,7 @@ def resolve_reply_previews(
                 ),
                 "author_id": decoded.get("author_id"),
                 "attachments": attachments,
+                "fwd": _build_forward_info(decoded.get("fwd")),
             }
             if attachments:
                 target_first_attachment[target_key] = attachments[0]
@@ -2490,6 +2501,7 @@ def resolve_reply_previews(
                     target_attachment_meta=(
                         _attachment_meta_string(first) if first is not None else None
                     ),
+                    target_forward_info=row.get("fwd"),
                 ),
             )
         )

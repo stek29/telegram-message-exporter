@@ -119,6 +119,7 @@ class ReplyInfo:
     target_filename: Optional[str] = None
     target_attachment_meta: Optional[str] = None
     target_unavailable: bool = False
+    target_forward_info: Optional[ForwardInfo] = None
 
 
 class PeerKind(enum.Enum):

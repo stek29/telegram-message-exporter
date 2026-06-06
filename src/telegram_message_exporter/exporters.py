@@ -437,6 +437,7 @@ header.header-panel {
 }
 .reply-quote:hover { background: rgba(15, 23, 42, 0.55); }
 .reply-quote .reply-author { font-weight: 600; color: var(--ink); }
+.reply-quote .reply-forwarded { color: var(--muted); font-weight: 400; }
 .reply-quote .reply-snippet { display: block; margin-top: 2px; }
 .reply-quote .reply-emoji { margin-right: 4px; }
 .reply-quote.unavailable { opacity: 0.6; font-style: italic; }
@@ -1865,6 +1866,9 @@ def _render_markdown_reply_line(
       intra-chat replies. The link is a ``#msg-{mid}`` in-page anchor.
     * ``> In reply to **Author**: <...>`` for cross-chat replies. The
       link is a ``t.me/.../{mid}`` URL.
+    * When the target was itself a forward, the author line is extended
+      with ``· Forwarded from **Original**`` between the author and the
+      snippet. The "Forwarded from" fragment is plain text (no link).
 
     The ``out_path`` is used to build a same-file in-page anchor for
     intra-chat cases (``{basename}.html#msg-{mid}``). When not given,
@@ -1883,6 +1887,8 @@ def _render_markdown_reply_line(
     if not author_name:
         author_name = "Unknown"
 
+    forwarded_from_name = _reply_forwarded_from_name(reply, peer_map)
+
     href: Optional[str] = None
     if reply.is_intra_chat:
         if out_path is not None:
@@ -1900,6 +1906,8 @@ def _render_markdown_reply_line(
 
     text = _reply_preview_text(reply)
     body_label = f"In reply to **{author_name}**"
+    if forwarded_from_name:
+        body_label = f"{body_label} · Forwarded from **{forwarded_from_name}**"
     if text:
         body_label = f"{body_label}: {text}"
 
@@ -2378,6 +2386,12 @@ def _csv_reply_info(
             target_timestamp = to_local(reply.target_timestamp, tz).isoformat()
         else:
             target_timestamp = reply.target_timestamp.isoformat()
+    target_forwarded_from_id: Optional[int] = None
+    target_forwarded_from: Optional[str] = None
+    if reply.target_forward_info is not None:
+        fwd = reply.target_forward_info
+        target_forwarded_from_id = fwd.source_id or fwd.author_id
+        target_forwarded_from = _reply_forwarded_from_name(reply, peer_map)
     return json.dumps(
         {
             "target_peer_id": reply.target_peer_id,
@@ -2393,6 +2407,8 @@ def _csv_reply_info(
             "target_filename": reply.target_filename,
             "target_attachment_meta": reply.target_attachment_meta,
             "unavailable": reply.target_unavailable,
+            "target_forwarded_from_id": target_forwarded_from_id,
+            "target_forwarded_from": target_forwarded_from,
         },
         ensure_ascii=False,
     )
@@ -2939,11 +2955,23 @@ def _render_reply_preview_html(
     if not author_name:
         author_name = "Unknown"
 
+    forwarded_from_name = _reply_forwarded_from_name(reply, peer_map)
+
     text = _reply_preview_text(reply)
     emoji = _reply_emoji_for_kind(reply.target_attachment_kind)
 
     parts: list[str] = []
-    parts.append(f'<div class="reply-author">{html.escape(author_name)}</div>')
+    if forwarded_from_name:
+        parts.append(
+            f'<div class="reply-author">'
+            f"{html.escape(author_name)} "
+            f'<span class="reply-forwarded">'
+            f"· Forwarded from {html.escape(forwarded_from_name)}"
+            f"</span>"
+            f"</div>"
+        )
+    else:
+        parts.append(f'<div class="reply-author">{html.escape(author_name)}</div>')
     snippet_html = ""
     if emoji:
         snippet_html += f'<span class="reply-emoji">{html.escape(emoji)}</span>'
@@ -2975,6 +3003,40 @@ def _peer_label_for_reply(
     if reply.target_author_id is not None and peer_map is not None:
         return _peer_label(reply.target_author_id, peer_map)
     return "Unknown"
+
+
+def _reply_forwarded_from_name(
+    reply: ReplyInfo, peer_map: Optional[dict[int, PeerInfo]]
+) -> Optional[str]:
+    """Display name for the *original* author of a forwarded reply target.
+
+    Returns ``None`` when the target is not a forward, or when no
+    resolvable name is available. Used to inline a "Forwarded from X"
+    fragment in the reply preview.
+    """
+    info = reply.target_forward_info
+    if info is None:
+        return None
+    source = (
+        peer_map.get(info.source_id)
+        if info.source_id is not None and peer_map
+        else None
+    )
+    if source is not None:
+        return source.name
+    author = (
+        peer_map.get(info.author_id)
+        if info.author_id is not None and peer_map
+        else None
+    )
+    if author is not None:
+        return author.name
+    if info.author_signature:
+        return info.author_signature
+    fallback_id = info.source_id or info.author_id
+    if fallback_id is not None:
+        return f"peer {fallback_id}"
+    return None
 
 
 def _reply_preview_text(reply: ReplyInfo) -> str:
