@@ -214,6 +214,7 @@ header.header-panel {
   overflow: hidden;
   background: #000;
   box-shadow: 0 8px 22px rgba(2, 6, 23, 0.5);
+  cursor: pointer;
 }
 .video-message video {
   display: block;
@@ -221,6 +222,27 @@ header.header-panel {
   height: 100%;
   object-fit: cover;
   border-radius: 50%;
+}
+.video-message .play-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.25);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+.video-message .play-overlay svg {
+  width: 28%;
+  height: 28%;
+  fill: rgba(255, 255, 255, 0.95);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+}
+.video-message.playing .play-overlay {
+  opacity: 0;
+  pointer-events: none;
 }
 .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .forwarded {
@@ -1075,8 +1097,14 @@ def _render_html_attachment(
             )
         elif attachment.kind == "video_message":
             handle.write(
-                f'<div class="video-message"><video controls preload="none" playsinline>'
-                f'<source src="{path}" type="{mime_type}"></video></div>'
+                f'<div class="video-message" data-video-message>'
+                f'<video preload="metadata" playsinline loop>'
+                f'<source src="{path}" type="{mime_type}"></video>'
+                f'<button class="play-overlay" type="button" '
+                f'aria-label="Play video message">'
+                f'<svg viewBox="0 0 24 24" aria-hidden="true">'
+                f'<path d="M8 5v14l11-7z"/></svg>'
+                f"</button></div>"
             )
         elif attachment.kind == "video" or (
             attachment.kind == "sticker"
@@ -1218,6 +1246,20 @@ def _back_to_top_script() -> str:
         window.scrollTo({ top: 0, behavior: 'smooth' });
       });
     }
+    document.querySelectorAll('[data-video-message]').forEach(container => {
+      const video = container.querySelector('video');
+      const toggle = () => {
+        if (video.paused || video.ended) {
+          video.play();
+        } else {
+          video.pause();
+        }
+      };
+      container.addEventListener('click', toggle);
+      video.addEventListener('play', () => container.classList.add('playing'));
+      video.addEventListener('pause', () => container.classList.remove('playing'));
+      video.addEventListener('ended', () => container.classList.remove('playing'));
+    });
     </script>
     """
     return script
