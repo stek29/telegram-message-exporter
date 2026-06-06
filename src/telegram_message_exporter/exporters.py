@@ -2710,7 +2710,7 @@ def render_csv(
                                 "selected_cache_key": attachment.selected_cache_key,
                                 "source_path": attachment.source_path,
                                 "url": attachment.url,
-                                "metadata": attachment.metadata,
+                                "metadata": _csv_safe_metadata(attachment.metadata),
                                 **(
                                     {
                                         "action_summary": _build_action_summary(
@@ -2727,7 +2727,6 @@ def render_csv(
                             for attachment in msg.attachments
                         ],
                         ensure_ascii=False,
-                        default=_json_default,
                     ),
                     (
                         json.dumps(
@@ -2763,7 +2762,6 @@ def render_csv(
                                 "is_imported": msg.forward_info.is_imported,
                             },
                             ensure_ascii=False,
-                            default=_json_default,
                         )
                         if msg.forward_info
                         else ""

@@ -1035,8 +1035,6 @@ def _action_attachment(media: "TelegramMediaAction") -> Attachment:
     """
     raw_type = int(media.type)
     payload = dict(media.payload)
-    if isinstance(payload.get("peerIds"), (bytes, bytearray)):
-        payload["peerIds"] = _decode_peer_ids_from_buffer(payload["peerIds"])
     extra: dict[str, Any] = {}
     if media.type is TelegramMediaActionType.SET_CHAT_THEME:
         emoticon = _chat_theme_emoticon(payload.get("chatTheme"))
