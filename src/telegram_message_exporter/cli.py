@@ -26,11 +26,13 @@ from .db import (
 )
 from .exporters import (
     RenderOptions,
+    copy_message_media,
     render_csv,
     render_html,
     render_markdown,
 )
 from .postbox import (
+    PostboxMediaResolver,
     iter_postbox_messages,
     list_peers_postbox,
     load_peer_map,
@@ -139,6 +141,12 @@ def cmd_export(args: argparse.Namespace) -> None:
     peer_map: Optional[dict[int, str]] = None
     if is_postbox_kv_table(conn, table):
         peer_table = PostboxTable.PEER.sqlite_name
+        media_table = PostboxTable.MESSAGE_MEDIA.sqlite_name
+        media_resolver = (
+            PostboxMediaResolver(conn, media_table, table)
+            if media_table in list_tables(conn)
+            else None
+        )
         rows = iter_postbox_message_rows(conn, table, options, debug=args.debug)
         messages = iter_postbox_messages(
             rows,
@@ -146,6 +154,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             start_ts=options.start_ts,
             end_ts=options.end_ts,
             limit=options.limit,
+            media_resolver=media_resolver,
         )
         if options.peer_id is None:
             peer_rows = conn.execute(f"SELECT key, value FROM {peer_table}")
@@ -153,7 +162,19 @@ def cmd_export(args: argparse.Namespace) -> None:
             referenced_peer_ids = {
                 peer_id
                 for message in messages
-                for peer_id in (message.peer_id, message.author_id)
+                for peer_id in (
+                    message.peer_id,
+                    message.author_id,
+                    message.forward_info.author_id
+                    if message.forward_info is not None
+                    else None,
+                    message.forward_info.source_id
+                    if message.forward_info is not None
+                    else None,
+                    message.forward_info.source_message_peer_id
+                    if message.forward_info is not None
+                    else None,
+                )
                 if peer_id is not None
             }
             referenced_peer_ids.add(options.peer_id)
@@ -173,6 +194,14 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     title = args.contact or _title_from_peer(peer_map, peer_id)
     out_path = Path(args.out) if args.out else _default_out_path(args.format)
+    media_dir = _resolve_media_dir(args.media_dir, db_path)
+    if media_dir is not None:
+        messages, copied_count = copy_message_media(messages, media_dir, out_path)
+        if args.debug:
+            print(
+                f"[media] copied {copied_count} cached files from {media_dir}",
+                file=sys.stderr,
+            )
 
     if args.format == "md":
         render_markdown(
@@ -205,6 +234,19 @@ def _title_from_peer(peer_map: Optional[dict[int, str]], peer_id: Optional[int])
 def _default_out_path(fmt: str) -> Path:
     suffix = {"md": "md", "csv": "csv", "html": "html"}.get(fmt, "md")
     return Path(f"chat_export.{suffix}")
+
+
+def _resolve_media_dir(value: Optional[str], db_path: Path) -> Optional[Path]:
+    if value:
+        media_dir = Path(value).expanduser()
+        if not media_dir.is_dir():
+            raise SystemExit(f"Media directory not found: {media_dir}")
+        return media_dir
+    if db_path.parent.name == "db":
+        candidate = db_path.parent.parent / "media"
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def _resolve_peer_id(
@@ -277,6 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export format (md, csv, html)",
     )
     export.add_argument("--out", help="Output file path (defaults by format)")
+    export.add_argument(
+        "--media-dir",
+        help="Telegram postbox/media directory; copies referenced cached files",
+    )
     export.add_argument(
         "--show-direction", action="store_true", help="Append (in)/(out) labels"
     )

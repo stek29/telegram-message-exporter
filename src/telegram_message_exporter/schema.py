@@ -327,6 +327,7 @@ POSTBOX_MEDIA_HELPER_TYPES = (
     "MapGeoAddress",
     "MapVenue",
     "SecretFileMediaResource",
+    "SecureFileMediaResource",
     "StarGift",
     "StickerPackReference",
     "SuggestedPostApprovalStatus",
@@ -349,6 +350,7 @@ POSTBOX_MEDIA_HELPER_TYPES = (
     "VideoRepresentation",
     "VideoThumbnail",
     "WebFileReferenceMediaResource",
+    "WallpaperDataResource",
 )
 
 
@@ -419,6 +421,15 @@ POSTBOX_MESSAGE_ATTRIBUTE_TYPES = (
 
 
 POSTBOX_FIELD_ALIASES: dict[str, dict[str, str]] = {
+    "CloudFileMediaResource": {
+        "d": "datacenter_id",
+        "v": "volume_id",
+        "l": "local_id",
+        "s": "secret",
+        "n64": "size",
+        "n": "legacy_size",
+        "fr": "file_reference",
+    },
     "CloudDocumentMediaResource": {
         "d": "datacenter_id",
         "f": "file_id",
@@ -435,6 +446,13 @@ POSTBOX_FIELD_ALIASES: dict[str, dict[str, str]] = {
         "s": "size_spec",
         "fr": "file_reference",
     },
+    "CloudPeerPhotoSizeMediaResource": {
+        "d": "datacenter_id",
+        "p": "photo_id",
+        "s": "size_spec",
+        "v": "volume_id",
+        "l": "local_id",
+    },
     "CloudPhotoSizeMediaResource": {
         "d": "datacenter_id",
         "i": "photo_id",
@@ -443,6 +461,50 @@ POSTBOX_FIELD_ALIASES: dict[str, dict[str, str]] = {
         "n64": "size",
         "n": "legacy_size",
         "fr": "file_reference",
+    },
+    "CloudStickerPackThumbnailMediaResource": {
+        "d": "datacenter_id",
+        "t": "thumb_version",
+        "v": "volume_id",
+        "l": "local_id",
+    },
+    "HttpReferenceMediaResource": {
+        "u": "url",
+        "s64": "size",
+        "s": "legacy_size",
+    },
+    "LocalFileMediaResource": {
+        "f": "file_id",
+        "sr": "is_secret_related",
+        "s64": "size",
+        "s": "legacy_size",
+    },
+    "LocalFileReferenceMediaResource": {
+        "p": "local_file_path",
+        "r": "random_id",
+        "t": "is_uniquely_referenced_temporary_file",
+        "s64": "size",
+        "s": "legacy_size",
+    },
+    "SecretFileMediaResource": {
+        "i": "file_id",
+        "a": "access_hash",
+        "s64": "container_size",
+        "s": "legacy_container_size",
+        "ds64": "decrypted_size",
+        "ds": "legacy_decrypted_size",
+        "d": "datacenter_id",
+        "k": "key",
+    },
+    "SecureFileMediaResource": {
+        "f": "file_id",
+        "a": "access_hash",
+        "n64": "size",
+        "n": "legacy_size",
+        "d": "datacenter_id",
+        "t": "timestamp",
+        "h": "file_hash",
+        "s": "encrypted_secret",
     },
     "TelegramMediaContact": {
         "n.f": "first_name",
@@ -502,6 +564,24 @@ POSTBOX_FIELD_ALIASES: dict[str, dict[str, str]] = {
         "hv": "has_video",
         "ip": "is_personal",
     },
+    "VideoThumbnail": {
+        "w": "width",
+        "h": "height",
+        "r": "resource",
+    },
+    "VideoRepresentation": {
+        "w": "width",
+        "h": "height",
+        "r": "resource",
+        "s": "start_timestamp",
+    },
+    "WallpaperDataResource": {"s": "slug"},
+    "WebFileReferenceMediaResource": {
+        "u": "url",
+        "s64": "size",
+        "s": "legacy_size",
+        "h": "access_hash",
+    },
     "TelegramMediaStory": {
         "pid": "peer_id",
         "sid": "story_id",
@@ -519,6 +599,10 @@ POSTBOX_FIELD_ALIASES: dict[str, dict[str, str]] = {
         "ct": "content_type",
         "pendingDate": "pending_date",
         "pendingUrl": "pending_url",
+        "u": "url",
+        "d": "display_url",
+        "ti": "title",
+        "tx": "text",
     },
     "TelegramMediaWebpageLoadedContent": {
         "u": "url",

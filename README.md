@@ -253,9 +253,15 @@ telegram-exporter export \
 telegram-exporter export \
   --db recovery/plaintext.db \
   --peer-id 123456789 \
+  --media-dir "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/media" \
   --format html \
   --out recovery/chat.html
 ```
+
+When `--media-dir` is supplied, cached attachments referenced by exported
+messages are copied to `recovery/chat_media/` and linked from the transcript.
+If the database is used directly from its original `postbox/db/` directory,
+the sibling `postbox/media/` directory is detected automatically.
 
 ### Export by contact name
 
@@ -385,6 +391,7 @@ telegram-exporter decrypt \
 | `--end-date` | no | End date, `YYYY-MM-DD` or ISO datetime |
 | `--format` | no | `html`, `md`, or `csv`; default `md` |
 | `--out` | no | Output path; defaults to `chat_export.<format>` |
+| `--media-dir` | no | Telegram `postbox/media` cache; copies referenced files beside the export |
 | `--show-direction` | no | Append `(in)` or `(out)` labels in Markdown |
 | `--debug` | no | Print SQL key ranges and `EXPLAIN QUERY PLAN` output |
 
@@ -398,7 +405,7 @@ telegram-exporter decrypt \
 | --- | --- | --- |
 | `html` | Reading and sharing a polished transcript | Includes summary cards, date jump, back-to-top, and link handling |
 | `md` | Archival text, notes, version control | Compact, portable, and easy to diff |
-| `csv` | Analysis in spreadsheets or scripts | Includes date, time, Unix timestamp, direction, speaker, text, peer ID, and author ID |
+| `csv` | Analysis in spreadsheets or scripts | Includes message metadata and a JSON attachments column |
 
 ### Markdown snippet
 
@@ -496,7 +503,8 @@ telegram-exporter decrypt \
 - Does not bypass a Telegram local passcode; you need the passcode.
 - Does not recover messages that no longer exist in the local cache.
 - Does not download content from Telegram servers.
-- Does not currently extract media files from Telegram's file cache.
+- Only locally cached media can be copied; unavailable files are represented by
+  attachment metadata and are not downloaded.
 - Some newer or uncommon Telegram message payloads may only partially decode.
 - Does not support Telegram Desktop/Qt, the Mac App Store version, mobile
   backups, or Telegram cloud export archives.
@@ -531,8 +539,10 @@ storage setup, so it is outside the supported recovery path.
 
 ### Can it recover photos, videos, or documents?
 
-Not currently. The exporter focuses on decoded message text and transcript
-metadata.
+Yes, when the corresponding files still exist in Telegram's local
+`postbox/media` cache. Pass `--media-dir`; the exporter copies referenced files
+beside the transcript. Missing cache files are listed as attachment metadata but
+cannot be downloaded.
 
 ---
 
