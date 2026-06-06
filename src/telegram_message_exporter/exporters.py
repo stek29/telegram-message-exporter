@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import Attachment, ForwardedSegment, Message, PeerInfo
+from .models import Attachment, ForwardedSegment, Message, PeerInfo, ReplyInfo
 from .postbox import _decode_peer_ids_from_buffer, peer_url
 from .hashing import persistent_hash32
 from .schema import ConferenceCallFlags, PhoneCallDiscardReason, TelegramMediaActionType
@@ -418,6 +418,30 @@ header.header-panel {
   border-left: 2px solid var(--accent);
   color: #bae6fd;
 }
+.reply-quote {
+  display: block;
+  padding: 6px 10px;
+  margin: 0 0 8px;
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.35);
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+  max-width: 100%;
+}
+.reply-quote a, .reply-quote a:hover {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+}
+.reply-quote:hover { background: rgba(15, 23, 42, 0.55); }
+.reply-quote .reply-author { font-weight: 600; color: var(--ink); }
+.reply-quote .reply-snippet { display: block; margin-top: 2px; }
+.reply-quote .reply-emoji { margin-right: 4px; }
+.reply-quote.unavailable { opacity: 0.6; font-style: italic; }
+.time-anchor { color: inherit; text-decoration: none; }
+.time-anchor:hover { text-decoration: underline; }
 .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
 a { color: var(--accent); text-decoration: none; word-break: break-word; overflow-wrap: anywhere; }
 a:hover { text-decoration: underline; }
@@ -1180,6 +1204,75 @@ def _format_duration(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+_REPLY_KIND_EMOJI: dict[str, str] = {
+    "image": "📷",
+    "video": "🎬",
+    "video_message": "🎥",
+    "voice": "🎤",
+    "audio": "🎵",
+    "sticker": "💬",
+    "file": "📎",
+    "webpage": "🔗",
+    "poll": "📊",
+    "action": "ℹ️",
+}
+
+
+def _reply_emoji_for_kind(kind: Optional[str]) -> Optional[str]:
+    """Return the emoji glyph used in the reply preview for a given media kind."""
+    if not kind:
+        return None
+    return _REPLY_KIND_EMOJI.get(kind)
+
+
+def _reply_kind_label(kind: Optional[str]) -> str:
+    """Return the Title-Cased kind word used in the reply preview label."""
+    if not kind:
+        return "Message"
+    overrides = {
+        "video_message": "Video message",
+        "image": "Photo",
+        "voice": "Voice",
+        "audio": "Audio",
+        "sticker": "Sticker",
+        "file": "File",
+        "webpage": "Link",
+        "poll": "Poll",
+        "action": "Service",
+    }
+    return overrides.get(kind, kind.replace("_", " ").title())
+
+
+def _truncate_reply_text(text: str, limit: int = 200) -> str:
+    """Trim a long reply snippet/full-text to ``limit`` chars with a trailing ellipsis."""
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def _format_reply_meta(reply: ReplyInfo) -> str:
+    """Compose the ``· filename · size · duration`` suffix for a reply preview.
+
+    Skips empty parts and joins the remaining ones with ``" · "``.
+    For polls the question replaces the suffix; for stickers the
+    ``sticker_emoji`` is appended.
+    """
+    parts: list[str] = []
+    kind = reply.target_attachment_kind
+    if kind == "poll":
+        if reply.target_attachment_meta:
+            parts.append(reply.target_attachment_meta)
+    else:
+        if reply.target_filename:
+            parts.append(reply.target_filename)
+        if reply.target_attachment_meta:
+            parts.append(reply.target_attachment_meta)
+        if kind == "sticker" and reply.target_attachment_emoji:
+            parts.append(reply.target_attachment_emoji)
+    return " · ".join(parts)
+
+
 def _format_phone_call_label(reason: Optional[int]) -> str:
     """Map a ``PhoneCallDiscardReason`` raw value to a human label."""
     if reason is None:
@@ -1757,6 +1850,64 @@ def _md_joined_by_link(
     return base
 
 
+def _render_markdown_reply_line(
+    msg: Message,
+    peer_map: Optional[dict[int, PeerInfo]],
+    out_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Return a Markdown blockquote line summarising a reply target.
+
+    Returns ``None`` when ``msg.reply_info`` is absent. Returns a line of
+    the form:
+
+    * ``> In reply to (message unavailable)`` when the t7 lookup missed.
+    * ``> In reply to **Author**: <snippet or emoji caption>`` for
+      intra-chat replies. The link is a ``#msg-{mid}`` in-page anchor.
+    * ``> In reply to **Author**: <...>`` for cross-chat replies. The
+      link is a ``t.me/.../{mid}`` URL.
+
+    The ``out_path`` is used to build a same-file in-page anchor for
+    intra-chat cases (``{basename}.html#msg-{mid}``). When not given,
+    the line emits a bare ``#msg-{mid}`` anchor; Markdown viewers don't
+    follow it as a link, but the text is still informative.
+    """
+    reply = msg.reply_info
+    if reply is None:
+        return None
+    if reply.target_unavailable:
+        return "> In reply to (message unavailable)"
+
+    author_name = "Unknown"
+    if reply.target_author_id is not None and peer_map is not None:
+        author_name = _peer_label(reply.target_author_id, peer_map)
+    if not author_name:
+        author_name = "Unknown"
+
+    href: Optional[str] = None
+    if reply.is_intra_chat:
+        if out_path is not None:
+            href = f"{out_path.name}#msg-{reply.target_message_id}"
+        else:
+            href = f"#msg-{reply.target_message_id}"
+    else:
+        target_peer = peer_map.get(reply.target_peer_id) if peer_map else None
+        if target_peer is not None:
+            href = peer_url(
+                target_peer,
+                reply.target_peer_id,
+                message_id=reply.target_message_id,
+            )
+
+    text = _reply_preview_text(reply)
+    body_label = f"In reply to **{author_name}**"
+    if text:
+        body_label = f"{body_label}: {text}"
+
+    if href:
+        return f"> {_md_link(body_label, href)}"
+    return f"> {body_label}"
+
+
 def _render_markdown_attachment(
     attachment: Attachment,
     peer_map: Optional[dict[int, PeerInfo]] = None,
@@ -2178,6 +2329,64 @@ def _csv_name_color(
     return info.name_color
 
 
+def _json_default(obj: object) -> object:
+    """JSON encoder fallback for Postbox-decoded values that aren't directly serializable.
+
+    Used by ``render_csv`` to convert ``bytes`` (Postbox ``INT64_ARRAY`` /
+    ``BYTES`` blobs), ``datetime`` instances, and ``Path`` objects into
+    JSON-friendly representations. Returns ``repr(obj)`` for anything else
+    so we never lose the value silently.
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.hex()
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
+    return repr(obj)
+
+
+def _csv_reply_info(
+    msg: Message,
+    peer_map: Optional[dict[int, PeerInfo]],
+    tz: Optional[object],
+) -> object:
+    """Build a ``reply_info`` JSON dict for the CSV column, or ``""``."""
+    reply = msg.reply_info
+    if reply is None:
+        return ""
+    target_author: Optional[str] = None
+    if reply.target_author_id is not None and peer_map is not None:
+        target_author = _resolve_peer_name(reply.target_author_id, peer_map)
+    target_text: Optional[str] = reply.target_text
+    if target_text is not None and len(target_text) > 280:
+        target_text = target_text[:279] + "…"
+    target_timestamp: Optional[str] = None
+    if reply.target_timestamp is not None:
+        if tz is not None:
+            target_timestamp = to_local(reply.target_timestamp, tz).isoformat()
+        else:
+            target_timestamp = reply.target_timestamp.isoformat()
+    return json.dumps(
+        {
+            "target_peer_id": reply.target_peer_id,
+            "target_message_id": reply.target_message_id,
+            "is_quote": reply.is_quote,
+            "is_intra_chat": reply.is_intra_chat,
+            "target_author_id": reply.target_author_id,
+            "target_author": target_author,
+            "target_timestamp": target_timestamp,
+            "target_text": target_text,
+            "target_snippet": reply.target_snippet,
+            "target_attachment_kind": reply.target_attachment_kind,
+            "target_filename": reply.target_filename,
+            "target_attachment_meta": reply.target_attachment_meta,
+            "unavailable": reply.target_unavailable,
+        },
+        ensure_ascii=False,
+    )
+
+
 def _poll_percentages(metadata: dict) -> list[Optional[float]]:
     options = metadata.get("options") or []
     counts: list[Optional[int]] = [opt.get("vote_count") for opt in options]
@@ -2416,6 +2625,9 @@ def render_markdown(
             handle.write(
                 f"**{time_str} — {_md_link(speaker, speaker_url)}{direction}**\n\n"
             )
+            reply_line = _render_markdown_reply_line(msg, peer_map, out_path)
+            if reply_line:
+                handle.write(f"{reply_line}\n\n")
             forwarded_segments = build_forwarded_segments(msg, peer_map, tz)
             if forwarded_segments:
                 rendered_forwarded = "".join(
@@ -2453,6 +2665,7 @@ def render_csv(
                 "text",
                 "attachments",
                 "forward_info",
+                "reply_info",
                 "peer_id",
                 "author_id",
                 "name_color",
@@ -2503,6 +2716,7 @@ def render_csv(
                             for attachment in msg.attachments
                         ],
                         ensure_ascii=False,
+                        default=_json_default,
                     ),
                     (
                         json.dumps(
@@ -2538,10 +2752,12 @@ def render_csv(
                                 "is_imported": msg.forward_info.is_imported,
                             },
                             ensure_ascii=False,
+                            default=_json_default,
                         )
                         if msg.forward_info
                         else ""
                     ),
+                    _csv_reply_info(msg, peer_map, tz),
                     msg.peer_id or "",
                     msg.author_id or "",
                     _csv_name_color(msg.author_id, peer_map),
@@ -2681,6 +2897,102 @@ def _render_toolbar(handle) -> None:
     handle.write("</div>")
 
 
+def _render_reply_preview_html(
+    handle,
+    msg: Message,
+    reply: ReplyInfo,
+    peer_map: Optional[dict[int, PeerInfo]],
+) -> None:
+    """Render the ``.reply-quote`` block at the top of the bubble.
+
+    The href is an in-page ``#msg-{mid}`` anchor when the reply points
+    to a message in the current chat, or a ``t.me/.../{mid}`` URL when
+    it points to a message in a different chat. The block falls back to
+    a plain (no-link) "Message unavailable" cell when the t7 lookup
+    could not find the original.
+    """
+    if reply.target_unavailable:
+        handle.write('<div class="reply-quote unavailable">Message unavailable</div>')
+        return
+
+    href: Optional[str] = None
+    target_peer = peer_map.get(reply.target_peer_id) if peer_map else None
+    if reply.is_intra_chat:
+        href = f"#msg-{reply.target_message_id}"
+    elif target_peer is not None:
+        href = peer_url(
+            target_peer, reply.target_peer_id, message_id=reply.target_message_id
+        )
+
+    author_name = _peer_label_for_reply(reply, peer_map)
+    if reply.target_author_id is not None and peer_map is not None:
+        author_name = _peer_label(reply.target_author_id, peer_map)
+    if not author_name:
+        author_name = "Unknown"
+
+    text = _reply_preview_text(reply)
+    emoji = _reply_emoji_for_kind(reply.target_attachment_kind)
+
+    parts: list[str] = []
+    parts.append(f'<div class="reply-author">{html.escape(author_name)}</div>')
+    snippet_html = ""
+    if emoji:
+        snippet_html += f'<span class="reply-emoji">{html.escape(emoji)}</span>'
+    if text:
+        snippet_html += f'<span class="reply-text">{html.escape(text)}</span>'
+    if snippet_html:
+        parts.append(f'<div class="reply-snippet">{snippet_html}</div>')
+    elif not emoji:
+        parts.append(
+            '<div class="reply-snippet"><span class="reply-text">Message</span></div>'
+        )
+
+    inner_html = "".join(parts)
+    if href is None:
+        handle.write(f'<div class="reply-quote">{inner_html}</div>')
+    else:
+        safe_href = html.escape(href, quote=True)
+        handle.write(
+            f'<div class="reply-quote">'
+            f'<a class="reply-link" href="{safe_href}">{inner_html}</a>'
+            f"</div>"
+        )
+
+
+def _peer_label_for_reply(
+    reply: ReplyInfo, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    """Best-effort display name for the original's author."""
+    if reply.target_author_id is not None and peer_map is not None:
+        return _peer_label(reply.target_author_id, peer_map)
+    return "Unknown"
+
+
+def _reply_preview_text(reply: ReplyInfo) -> str:
+    """Return the snippet / full text / media-caption for a reply preview.
+
+    Preference order:
+
+    1. The user-selected snippet (``reply.target_snippet``), when set.
+    2. The original's full text (``reply.target_text``), truncated to
+       200 chars.
+    3. The composed media caption (``{kind word}{ · meta}``) when the
+       original had a first attachment and no text.
+    4. Empty string (caller decides whether to render anything).
+    """
+    if reply.target_snippet:
+        return _truncate_reply_text(reply.target_snippet)
+    if reply.target_text:
+        return _truncate_reply_text(reply.target_text)
+    if reply.target_attachment_kind:
+        label = _reply_kind_label(reply.target_attachment_kind)
+        meta = _format_reply_meta(reply)
+        if meta:
+            return f"{label} · {meta}"
+        return label
+    return ""
+
+
 def _render_messages(
     handle,
     messages: list[Message],
@@ -2702,15 +3014,28 @@ def _render_messages(
             if peer_id is not None
             else ""
         )
+        msg_id_attr = (
+            f' id="msg-{html.escape(str(msg.message_id), quote=True)}"'
+            if msg.message_id is not None
+            else ""
+        )
         if iso:
-            time_el = (
+            time_inner = (
                 f'<time class="local-time" datetime="{html.escape(iso)}">'
                 f"{html.escape(time_str)}</time>"
             )
+            if msg.message_id is not None:
+                safe_anchor = html.escape(f"#msg-{msg.message_id}", quote=True)
+                time_el = (
+                    f'<a class="time-anchor" href="{safe_anchor}">{time_inner}</a>'
+                )
+            else:
+                time_el = time_inner
         else:
             time_el = "??:??:??"
         handle.write(
-            f'<div class="msg {direction}" data-iso="{html.escape(iso)}"{peer_id_attr}>'
+            f'<div class="msg {direction}" data-iso="{html.escape(iso)}"'
+            f"{peer_id_attr}{msg_id_attr}>"
         )
         if peer_id is not None:
             peer_info = peer_map.get(peer_id) if peer_map else None
@@ -2729,6 +3054,8 @@ def _render_messages(
             f'<div class="meta">[{time_el}] '
             f'<span class="speaker">{_html_link(speaker, speaker_url)}</span></div>'
         )
+        if msg.reply_info is not None:
+            _render_reply_preview_html(handle, msg, msg.reply_info, peer_map)
         forwarded_segments = build_forwarded_segments(msg, peer_map)
         if forwarded_segments:
             handle.write('<div class="meta forwarded">')

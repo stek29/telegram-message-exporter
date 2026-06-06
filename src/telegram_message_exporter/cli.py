@@ -36,6 +36,7 @@ from .postbox import (
     PostboxMediaResolver,
     attachment_referenced_peer_ids,
     iter_postbox_messages,
+    resolve_reply_previews,
     list_peers_postbox,
     load_peer_map,
 )
@@ -154,6 +155,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             limit=options.limit,
             media_resolver=media_resolver,
         )
+        messages = resolve_reply_previews(messages, conn, table, media_resolver)
         if options.peer_id is None:
             peer_rows = conn.execute(f"SELECT key, value FROM {peer_table}")
         else:

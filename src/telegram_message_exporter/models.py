@@ -83,6 +83,44 @@ class ForwardInfo:
     is_imported: bool = False
 
 
+@dataclass(frozen=True)
+class ReplyInfo:
+    """Pointer to a message that this message replies to (or quotes).
+
+    The pointer is parsed from the message's
+    ``ReplyMessageAttribute`` / ``QuotedReplyMessageAttribute`` payload
+    (both already registered in ``POSTBOX_MESSAGE_ATTRIBUTE_TYPES``).
+    The enrichment fields (``target_author_id`` / ``target_timestamp`` /
+    ``target_text`` / ``target_snippet`` / ``target_attachment_*``) are
+    filled by ``resolve_reply_previews`` after a follow-up scan of the
+    Postbox ``t7`` (MESSAGE_HISTORY) table.
+
+    ``target_author_name`` is *not* filled by the lookup pass — it is
+    resolved at render time from ``peer_map[target_author_id]``, the
+    same pattern used for ``ForwardInfo`` segments.
+
+    ``is_intra_chat`` is set by the parser to
+    ``target_peer_id == current_peer_id``. The renderer uses it to pick
+    an in-page ``#msg-{mid}`` anchor over an external ``t.me`` URL.
+    """
+
+    target_peer_id: int
+    target_message_id: int
+    is_quote: bool = False
+    is_intra_chat: bool = True
+
+    target_author_id: Optional[int] = None
+    target_author_name: Optional[str] = None
+    target_timestamp: Optional[datetime] = None
+    target_text: Optional[str] = None
+    target_snippet: Optional[str] = None
+    target_attachment_kind: Optional[str] = None
+    target_attachment_emoji: Optional[str] = None
+    target_filename: Optional[str] = None
+    target_attachment_meta: Optional[str] = None
+    target_unavailable: bool = False
+
+
 class PeerKind(enum.Enum):
     """High-level classification of a Telegram peer."""
 
@@ -130,6 +168,8 @@ class Message:
     author_id: Optional[int]
     attachments: tuple[Attachment, ...] = ()
     forward_info: Optional[ForwardInfo] = None
+    message_id: Optional[int] = None
+    reply_info: Optional[ReplyInfo] = None
 
     def speaker_hint(self) -> str:
         """Return a concise label for direction when no names are available."""

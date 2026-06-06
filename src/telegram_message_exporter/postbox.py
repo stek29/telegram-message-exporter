@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import enum
 import io
+import json
 import logging
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from .hashing import murmur_hash, persistent_hash32
-from .models import Attachment, ForwardInfo, Message, PeerInfo, PeerKind
+from .models import Attachment, ForwardInfo, Message, PeerInfo, PeerKind, ReplyInfo
 from .schema import (
     POSTBOX_FIELD_ALIASES,
     POSTBOX_MEDIA_HELPER_TYPES,
@@ -20,6 +21,7 @@ from .schema import (
     PostboxTable,
     TelegramMediaActionType,
 )
+from .db import iter_postbox_message_rows_for_peer
 
 logger = logging.getLogger(__name__)
 
@@ -1032,6 +1034,8 @@ def _action_attachment(media: "TelegramMediaAction") -> Attachment:
     """
     raw_type = int(media.type)
     payload = dict(media.payload)
+    if isinstance(payload.get("peerIds"), (bytes, bytearray)):
+        payload["peerIds"] = _decode_peer_ids_from_buffer(payload["peerIds"])
     extra: dict[str, Any] = {}
     if media.type is TelegramMediaActionType.SET_CHAT_THEME:
         emoticon = _chat_theme_emoticon(payload.get("chatTheme"))
@@ -2004,6 +2008,124 @@ def read_intermediate_fwd_info(reader: ByteReader) -> Optional[dict[str, Any]]:
     }
 
 
+def _decode_quote_payload(raw: Any) -> Optional[str]:
+    """Return the ``t`` (snippet text) field from an ``EngineMessageReplyQuote`` blob.
+
+    The ``qu`` key in both ``ReplyMessageAttribute`` and
+    ``QuotedReplyMessageAttribute`` is JSON-encoded by the iOS client
+    (see ``PostboxEncoder.encodeCodable`` in Coding.swift:424-428 and
+    ``PostboxDecoder.decodeCodable`` in Coding.swift:1182-1188).
+    ``raw`` is therefore ``bytes`` containing a JSON object with keys
+    ``t`` (text), ``e`` (entities), ``m`` (media), ``o`` (offset).
+    Returns ``None`` when the input is not bytes, fails to parse, or
+    has no ``t`` field.
+    """
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) == 0:
+        return None
+    try:
+        decoded = json.loads(bytes(raw).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    text = decoded.get("t")
+    if isinstance(text, str):
+        return text
+    return None
+
+
+def _reply_info_from_attributes(
+    attributes: list[Any],
+    current_peer_id: int,
+) -> Optional[ReplyInfo]:
+    """Build a :class:`ReplyInfo` from a message's attribute list.
+
+    Prefers ``ReplyMessageAttribute`` (intra-chat reply — always carries
+    a real ``messageId``). Falls back to ``QuotedReplyMessageAttribute``
+    (cross-chat quote — used when the original lives in a chat the
+    client may not have full access to). Returns ``None`` when neither
+    attribute is present.
+
+    Payload layout per the iOS source
+    (``submodules/TelegramCore/Sources/SyncCore/SyncCore_ReplyMessageAttribute.swift``):
+
+    * ``ReplyMessageAttribute``: ``p`` (target peer id i64), ``i``
+      (packed ``(namespace | (message_id << 32))`` i64), ``qu``
+      (``EngineMessageReplyQuote`` JSON bytes), ``iq`` (isQuote bool).
+    * ``QuotedReplyMessageAttribute``: ``p`` (target peer id i64,
+      optional), ``a`` (author display name, optional), ``qu`` (same
+      JSON blob), ``iq`` (isQuote bool, defaults to true).
+
+    ``is_intra_chat`` is set to ``target_peer_id == current_peer_id``,
+    which the renderer uses to pick an in-page ``#msg-{mid}`` anchor
+    over an external ``t.me`` URL.
+    """
+    reply_attr: Optional[dict[str, Any]] = None
+    quote_attr: Optional[dict[str, Any]] = None
+    for attribute in attributes or []:
+        if not isinstance(attribute, PostboxObject):
+            continue
+        if attribute.type_name == "ReplyMessageAttribute":
+            reply_attr = attribute.payload
+        elif attribute.type_name == "QuotedReplyMessageAttribute":
+            quote_attr = attribute.payload
+
+    target_peer_id: Optional[int] = None
+    target_message_id: Optional[int] = None
+    is_quote = False
+    snippet: Optional[str] = None
+
+    if reply_attr is not None:
+        raw_peer = reply_attr.get("p")
+        if isinstance(raw_peer, int) and not isinstance(raw_peer, bool):
+            target_peer_id = int(raw_peer)
+        raw_packed = reply_attr.get("i")
+        if (
+            isinstance(raw_packed, int)
+            and not isinstance(raw_packed, bool)
+            and target_peer_id is not None
+        ):
+            namespace = int(raw_packed) & 0xFFFFFFFF
+            mid = (int(raw_packed) >> 32) & 0xFFFFFFFF
+            if mid > 0:
+                target_message_id = mid
+                _ = namespace
+        raw_is_quote = reply_attr.get("iq")
+        if isinstance(raw_is_quote, bool):
+            is_quote = raw_is_quote
+        elif reply_attr.get("qu"):
+            is_quote = True
+        snippet = _decode_quote_payload(reply_attr.get("qu"))
+    elif quote_attr is not None:
+        raw_peer = quote_attr.get("p")
+        if isinstance(raw_peer, int) and not isinstance(raw_peer, bool):
+            target_peer_id = int(raw_peer)
+        raw_is_quote = quote_attr.get("iq")
+        if isinstance(raw_is_quote, bool):
+            is_quote = raw_is_quote
+        else:
+            is_quote = True
+        snippet = _decode_quote_payload(quote_attr.get("qu"))
+        raw_target_id = quote_attr.get("i")
+        if isinstance(raw_target_id, int) and not isinstance(raw_target_id, bool):
+            mid = (int(raw_target_id) >> 32) & 0xFFFFFFFF
+            if mid > 0:
+                target_message_id = mid
+        if target_message_id is None:
+            return None
+
+    if target_peer_id is None or target_message_id is None:
+        return None
+
+    return ReplyInfo(
+        target_peer_id=target_peer_id,
+        target_message_id=target_message_id,
+        is_quote=is_quote,
+        is_intra_chat=(target_peer_id == current_peer_id),
+        target_snippet=snippet,
+    )
+
+
 def read_intermediate_message(payload: bytes) -> Optional[dict[str, Any]]:
     """Decode a Postbox message payload to a structured dict."""
     reader = ByteReader(io.BytesIO(payload))
@@ -2166,11 +2288,213 @@ def iter_postbox_messages(
                 author_id=msg.get("author_id"),
                 attachments=attachments,
                 forward_info=forward_info,
+                message_id=idx.message_id,
+                reply_info=_reply_info_from_attributes(
+                    msg.get("attributes") or [], idx.peer_id
+                ),
             )
         )
         if limit and len(messages) >= limit:
             break
     return messages
+
+
+def _attachment_meta_string(attachment: Attachment) -> str:
+    """Return a short human string for an attachment's media metadata.
+
+    Used by :func:`resolve_reply_previews` to populate
+    ``ReplyInfo.target_attachment_meta``. Concatenates size / duration /
+    dimensions / sticker emoji / poll question, skipping empty parts.
+    """
+    parts: list[str] = []
+    if isinstance(attachment.size, int) and attachment.size >= 0:
+        size_str = _human_size(attachment.size)
+        parts.append(size_str)
+    if attachment.kind in ("video", "video_message", "voice", "audio"):
+        raw_duration = (
+            (attachment.metadata or {}).get("duration") if attachment.metadata else None
+        )
+        if raw_duration is None and attachment.kind in ("video", "video_message"):
+            raw_duration = (attachment.metadata or {}).get("video_duration")
+        if (
+            isinstance(raw_duration, int)
+            and not isinstance(raw_duration, bool)
+            and raw_duration > 0
+        ):
+            parts.append(_format_duration(raw_duration))
+    if (
+        isinstance(attachment.width, int)
+        and isinstance(attachment.height, int)
+        and attachment.width > 0
+        and attachment.height > 0
+        and attachment.kind not in ("sticker",)
+    ):
+        parts.append(f"{attachment.width}×{attachment.height}")
+    if attachment.kind == "sticker" and attachment.sticker_emoji:
+        parts.append(attachment.sticker_emoji)
+    if attachment.kind == "poll":
+        question = (attachment.metadata or {}).get("question", "")
+        if isinstance(question, str) and question:
+            question = question.strip()
+            if len(question) > 60:
+                question = question[:57] + "…"
+            parts.append(question)
+    return " · ".join(parts)
+
+
+def _attachment_kind_label(attachment: Attachment) -> str:
+    """Return a stable short kind string for an attachment (used by ReplyInfo)."""
+    if attachment.kind == "sticker":
+        return "sticker"
+    if attachment.kind == "video_message":
+        return "video_message"
+    if attachment.kind == "image":
+        return "image"
+    return attachment.kind
+
+
+def _attachment_emoji(attachment: Attachment) -> Optional[str]:
+    """Return the emoji glyph associated with a sticker attachment, if any."""
+    if attachment.kind == "sticker" and attachment.sticker_emoji:
+        return attachment.sticker_emoji
+    return None
+
+
+def _human_size(n: int) -> str:
+    """Format ``n`` bytes as a human-readable string (B/KB/MB/GB/TB, 1024-based)."""
+
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(n)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{int(value)} TB"
+
+
+def _format_duration(seconds: int) -> str:
+    """Format a duration in seconds as ``M:SS`` or ``H:MM:SS``."""
+
+    total = max(int(seconds), 0)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def resolve_reply_previews(
+    messages: list[Message],
+    conn: Any,
+    message_table: str,
+    media_resolver: Optional["PostboxMediaResolver"] = None,
+) -> list[Message]:
+    """Enrich every ``Message.reply_info`` with data looked up from ``t7``.
+
+    Walks ``messages`` for unique ``(target_peer_id, target_message_id)``
+    pairs in their ``reply_info`` field, scans the corresponding byte
+    range in the Postbox message-history table once per unique target
+    peer, and decodes the matching rows. Populates
+    ``target_author_id`` / ``target_timestamp`` / ``target_text`` and the
+    first attachment's kind / emoji / filename / meta on each
+    ``ReplyInfo``. Pairs with no matching row get
+    ``target_unavailable=True``. Messages without a ``reply_info`` are
+    returned unchanged.
+
+    Returns a new list of messages with their ``reply_info`` replaced
+    via ``dataclasses.replace``; the input list is not mutated.
+    """
+    targets: dict[tuple[int, int], None] = {}
+    for msg in messages:
+        if msg.reply_info is None:
+            continue
+        targets[(msg.reply_info.target_peer_id, msg.reply_info.target_message_id)] = (
+            None
+        )
+    if not targets:
+        return list(messages)
+
+    target_rows: dict[tuple[int, int], dict[str, Any]] = {}
+    target_first_attachment: dict[tuple[int, int], Attachment] = {}
+    target_author_ids: dict[tuple[int, int], Optional[int]] = {}
+
+    for target_peer_id in sorted({peer for peer, _mid in targets}):
+        rows = iter_postbox_message_rows_for_peer(conn, message_table, target_peer_id)
+        for key, value in rows:
+            if not isinstance(key, (bytes, bytearray)) or not isinstance(
+                value, (bytes, bytearray)
+            ):
+                continue
+            idx = MessageIndex.from_bytes(key)
+            target_key = (idx.peer_id, idx.message_id)
+            if target_key not in targets:
+                continue
+            decoded = read_intermediate_message(value)
+            if decoded is None:
+                continue
+            text = decoded.get("text") or ""
+            media = list(decoded.get("embedded_media") or [])
+            if media_resolver is not None:
+                for namespace, media_id in decoded.get("referenced_media_ids") or []:
+                    referenced_media = media_resolver.resolve(namespace, media_id)
+                    if referenced_media is not None:
+                        media.append(referenced_media)
+            attachments = tuple(
+                att for item in media for att in media_attachments(item)
+            )
+            target_rows[target_key] = {
+                "text": text,
+                "timestamp": (
+                    datetime.fromtimestamp(idx.timestamp) if idx.timestamp else None
+                ),
+                "author_id": decoded.get("author_id"),
+                "attachments": attachments,
+            }
+            if attachments:
+                target_first_attachment[target_key] = attachments[0]
+            target_author_ids[target_key] = decoded.get("author_id")
+
+    updated: list[Message] = []
+    for msg in messages:
+        if msg.reply_info is None:
+            updated.append(msg)
+            continue
+        reply = msg.reply_info
+        target_key = (reply.target_peer_id, reply.target_message_id)
+        row = target_rows.get(target_key)
+        if row is None:
+            updated.append(
+                replace(
+                    msg,
+                    reply_info=replace(reply, target_unavailable=True),
+                )
+            )
+            continue
+        first = target_first_attachment.get(target_key)
+        updated.append(
+            replace(
+                msg,
+                reply_info=replace(
+                    reply,
+                    target_author_id=target_author_ids.get(target_key),
+                    target_timestamp=row["timestamp"],
+                    target_text=row["text"] or None,
+                    target_attachment_kind=(
+                        _attachment_kind_label(first) if first is not None else None
+                    ),
+                    target_attachment_emoji=(
+                        _attachment_emoji(first) if first is not None else None
+                    ),
+                    target_filename=first.filename if first is not None else None,
+                    target_attachment_meta=(
+                        _attachment_meta_string(first) if first is not None else None
+                    ),
+                ),
+            )
+        )
+    return updated
 
 
 def parse_peer_key(raw_key: Any) -> Optional[int]:

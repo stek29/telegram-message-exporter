@@ -317,6 +317,35 @@ def iter_postbox_peer_rows(
     )
 
 
+def iter_postbox_message_rows_for_peer(
+    conn: sqlite3.Connection,
+    table: str,
+    peer_id: int,
+    debug: bool = False,
+) -> Iterable[tuple]:
+    """Yield every Postbox ``key, value`` row belonging to ``peer_id``.
+
+    Used by :func:`telegram_message_exporter.postbox.resolve_reply_previews`
+    to scan a peer once and pick out the specific ``message_id`` rows
+    referenced as reply targets. Same shape as
+    :func:`iter_postbox_message_rows` when ``FetchOptions.peer_id`` is
+    set with no time bounds.
+    """
+    peer_prefix = _postbox_key_prefix(peer_id)
+    query, params = _postbox_range_query(
+        table,
+        peer_prefix,
+        _prefix_successor(peer_prefix),
+    )
+    yield from _iter_query(
+        conn,
+        f"peer {peer_id} (reply lookup range)",
+        query,
+        params,
+        debug,
+    )
+
+
 @dataclass(frozen=True)
 class MessageColumns:
     """Resolved column names for a message table."""
