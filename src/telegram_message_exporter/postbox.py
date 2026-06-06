@@ -351,6 +351,24 @@ def _named_object_decoder(type_name: str):
     return decode
 
 
+def _decode_peer_ids_from_buffer(value: Any) -> list[int]:
+    """Decode a PeerId-encoded bytes blob into a list of peer ids.
+
+    The format is a fixed 8-byte little-endian int64 per peer id, with
+    no length prefix (length is ``len(value) // 8``). Used by
+    ``TelegramMediaAction.addedMembers`` / ``.removedMembers`` and the
+    ``requestedPeer`` action. Returns ``[]`` for non-bytes input or
+    input whose length is not a multiple of 8.
+    """
+    if not isinstance(value, (bytes, bytearray)):
+        return []
+    raw = bytes(value)
+    if len(raw) % 8 != 0:
+        return []
+    count = len(raw) // 8
+    return list(struct.unpack(f"<{count}q", raw))
+
+
 @PostboxDecoder.register_decoder
 class TelegramMediaAction:
     """Decoded Telegram service-message action."""
@@ -761,10 +779,127 @@ def _webpage_attachments(media: PostboxObject) -> list[Attachment]:
     ]
 
 
+def _chat_theme_emoticon(blob: Any) -> Optional[str]:
+    """Decode a ``setChatTheme`` chatTheme blob and return the emoticon.
+
+    The blob is a Postbox-encoded ``ChatTheme`` whose top-level keys are
+    ``type`` (Int32: 0 for emoticon, 1 for gift) and ``emoticon`` (String
+    for type 0). Returns the emoticon string for type 0, or ``None`` for
+    type 1 (gift) and any unresolvable / malformed blob.
+    """
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) == 0:
+        return None
+    try:
+        root = PostboxDecoder(bytes(blob)).decode_root_object()
+    except (ValueError, TypeError, struct.error):
+        return None
+    payload = getattr(root, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    raw_type = payload.get("type")
+    if raw_type != 0:
+        return None
+    emoticon = payload.get("emoticon")
+    if isinstance(emoticon, str) and emoticon:
+        return emoticon
+    return None
+
+
+def _action_attachment(media: "TelegramMediaAction") -> Attachment:
+    """Build an :class:`Attachment` for a decoded ``TelegramMediaAction``.
+
+    The raw Postbox payload is preserved verbatim under
+    ``metadata["payload"]`` and the integer discriminator is exposed as
+    ``metadata["raw_type"]``. A best-effort human-readable
+    ``metadata["summary"]`` is computed for action types that do not
+    need peer-name resolution; actions that reference peers store a
+    fallback summary here and the renderer (in ``exporters.py``)
+    rebuilds the final string with resolved names. ``filename`` keeps
+    the raw enum name for CSV back-compat.
+    """
+    raw_type = int(media.type)
+    payload = dict(media.payload)
+    extra: dict[str, Any] = {}
+    if media.type is TelegramMediaActionType.SET_CHAT_THEME:
+        emoticon = _chat_theme_emoticon(payload.get("chatTheme"))
+        if emoticon is not None:
+            extra["emoticon"] = emoticon
+    if media.type is TelegramMediaActionType.CUSTOM_TEXT:
+        entities = payload.get("ent")
+        if isinstance(entities, list):
+            extra["entity_count"] = len(entities)
+    summary = _best_effort_action_summary(media, extra)
+    metadata: dict[str, Any] = {"raw_type": raw_type, "payload": payload}
+    if extra:
+        metadata.update(extra)
+    metadata["summary"] = summary
+    return Attachment(
+        kind="action",
+        filename=media.type.name,
+        metadata=metadata,
+    )
+
+
+def _best_effort_action_summary(
+    media: "TelegramMediaAction", extra: dict[str, Any]
+) -> str:
+    """Build a peer-independent fallback summary for a service action."""
+    payload = media.payload
+    t = media.type
+    if t is TelegramMediaActionType.GROUP_CREATED:
+        title = payload.get("title")
+        return (
+            f"Group {title} was created"
+            if isinstance(title, str)
+            else "Group was created"
+        )
+    if t is TelegramMediaActionType.TITLE_UPDATED:
+        title = payload.get("title")
+        return (
+            f"Title changed to {title}" if isinstance(title, str) else "Title changed"
+        )
+    if t is TelegramMediaActionType.PINNED_MESSAGE_UPDATED:
+        return "Pinned a message"
+    if t is TelegramMediaActionType.PEER_JOINED:
+        return "Member joined"
+    if t is TelegramMediaActionType.JOINED_BY_REQUEST:
+        return "Member joined via request"
+    if t is TelegramMediaActionType.JOINED_BY_LINK:
+        return "Member joined via invite link"
+    if t is TelegramMediaActionType.ADDED_MEMBERS:
+        return "Added members"
+    if t is TelegramMediaActionType.REMOVED_MEMBERS:
+        return "Removed members"
+    if t is TelegramMediaActionType.PHONE_CALL:
+        is_video = payload.get("vc")
+        kind = "Video call" if is_video else "Voice call"
+        return f"📞 {kind}"
+    if t is TelegramMediaActionType.MESSAGE_AUTOREMOVE_TIMEOUT_UPDATED:
+        return "Auto-delete updated"
+    if t is TelegramMediaActionType.CUSTOM_TEXT:
+        text = payload.get("text")
+        if isinstance(text, str) and text:
+            snippet = text if len(text) <= 40 else text[:37] + "..."
+            return snippet
+        return "Custom text"
+    if t is TelegramMediaActionType.SET_CHAT_THEME:
+        emoticon = extra.get("emoticon")
+        if isinstance(emoticon, str) and emoticon:
+            return f"Theme: {emoticon}"
+        return "Theme updated"
+    if t is TelegramMediaActionType.GROUP_PHONE_CALL:
+        return "🎙️ Voice chat"
+    if t is TelegramMediaActionType.INVITE_TO_GROUP_PHONE_CALL:
+        return "Invited members to a voice chat"
+    if t is TelegramMediaActionType.CONFERENCE_CALL:
+        return "📹 Conference call"
+    return media.type.name
+
+
 def media_attachments(media: Any) -> list[Attachment]:
     """Convert a decoded Postbox media object to export attachments."""
     if isinstance(media, TelegramMediaAction):
-        return [Attachment(kind="action", filename=media.type.name)]
+        return [_action_attachment(media)]
     if not isinstance(media, PostboxObject):
         return []
     fields = media.fields

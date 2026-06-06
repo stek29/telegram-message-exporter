@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Optional
 
 from .models import Attachment, ForwardedSegment, Message, PeerInfo
-from .postbox import peer_url
+from .postbox import _decode_peer_ids_from_buffer, peer_url
+from .schema import ConferenceCallFlags, PhoneCallDiscardReason, TelegramMediaActionType
 from .utils import linkify_html, linkify_markdown, to_local
 
 HTML_BOOTSTRAP = (
@@ -396,6 +397,18 @@ header.header-panel {
 }
 .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .file-meta { font-size: 0.85em; opacity: 0.7; margin-top: 4px; }
+.service-msg {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: 6px 0;
+  border-top: 1px dashed rgba(148, 163, 184, 0.15);
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.15);
+  margin: 4px 0;
+}
+.service-msg a { color: var(--ink); font-style: normal; text-decoration: underline; }
+.service-msg .service-emoji { opacity: 0.8; margin-right: 4px; }
 .forwarded {
   padding-left: 8px;
   border-left: 2px solid var(--accent);
@@ -916,12 +929,592 @@ def _format_duration(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def _format_phone_call_label(reason: Optional[int]) -> str:
+    """Map a ``PhoneCallDiscardReason`` raw value to a human label."""
+    if reason is None:
+        return "ended"
+    try:
+        enum_value = PhoneCallDiscardReason(int(reason))
+    except (TypeError, ValueError):
+        return "ended"
+    return {
+        PhoneCallDiscardReason.MISSED: "missed",
+        PhoneCallDiscardReason.DISCONNECT: "disconnected",
+        PhoneCallDiscardReason.HANGUP: "ended",
+        PhoneCallDiscardReason.BUSY: "busy",
+    }.get(enum_value, "ended")
+
+
+def _format_autoremove_period(seconds: int) -> str:
+    """Render an auto-delete period as ``off`` / ``1 day`` / ``2 hours`` / ``30 minutes`` / ``45s``."""
+    total = int(seconds)
+    if total <= 0:
+        return "off"
+    if total % 86400 == 0:
+        days = total // 86400
+        return f"{days} day" if days == 1 else f"{days} days"
+    if total % 3600 == 0:
+        hours = total // 3600
+        return f"{hours} hour" if hours == 1 else f"{hours} hours"
+    if total % 60 == 0:
+        minutes = total // 60
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    return f"{total}s"
+
+
+def _format_conference_flags(flags: int) -> dict[str, bool]:
+    """Decompose the ``ConferenceCallFlags`` OptionSet into a dict of named flags."""
+    raw = int(flags) if isinstance(flags, int) and not isinstance(flags, bool) else 0
+    return {
+        "is_video": bool(raw & ConferenceCallFlags.IS_VIDEO),
+        "is_active": bool(raw & ConferenceCallFlags.IS_ACTIVE),
+        "is_missed": bool(raw & ConferenceCallFlags.IS_MISSED),
+    }
+
+
+def _peer_label(peer_id: int, peer_map: Optional[dict[int, PeerInfo]]) -> str:
+    """Return the display label for ``peer_id`` (falling back to ``peer <id>``)."""
+    if peer_map is not None:
+        info = peer_map.get(peer_id)
+        if info is not None and info.name:
+            return info.name
+    return f"peer {peer_id}"
+
+
+def _peer_url_for(
+    peer_id: int, peer_map: Optional[dict[int, PeerInfo]]
+) -> Optional[str]:
+    """Return a ``t.me`` URL for ``peer_id`` when the peer is linkable."""
+    if peer_map is None:
+        return None
+    info = peer_map.get(peer_id)
+    if info is None:
+        return None
+    return peer_url(info, peer_id)
+
+
+def _join_peer_names_html(
+    peer_ids: list[int], peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    """Render a peer list as ``Alice, Bob, Carol`` with each name linkified.
+
+    Empty list returns an empty string. Renders a single comma for the
+    natural-language join, applying the same comma-only style used by
+    the poll recent-voter renderer.
+    """
+    if not peer_ids:
+        return ""
+    rendered: list[str] = []
+    for peer_id in peer_ids:
+        label = _peer_label(peer_id, peer_map)
+        url = _peer_url_for(peer_id, peer_map)
+        rendered.append(_html_link(label, url))
+    return ", ".join(rendered)
+
+
+def _join_peer_names_md(
+    peer_ids: list[int], peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    """Same as :func:`_join_peer_names_html` but produces Markdown links."""
+    if not peer_ids:
+        return ""
+    rendered: list[str] = []
+    for peer_id in peer_ids:
+        label = _peer_label(peer_id, peer_map)
+        url = _peer_url_for(peer_id, peer_map)
+        rendered.append(_md_link(label, url))
+    return ", ".join(rendered)
+
+
+def _decode_payload_peer_ids(payload: dict) -> list[int]:
+    """Return the list of peer ids referenced by a service-action payload.
+
+    Handles both formats Telegram uses: the ``bytes``-encoded PeerId
+    buffer (used by ``addedMembers`` / ``removedMembers``) and the plain
+    ``INT64_ARRAY`` (used by ``inviteToGroupPhoneCall``).
+    """
+    raw_bytes = payload.get("peerIds")
+    if isinstance(raw_bytes, (bytes, bytearray)):
+        decoded = _decode_peer_ids_from_buffer(raw_bytes)
+        if decoded:
+            return decoded
+    raw_array = payload.get("peerIds")
+    if isinstance(raw_array, list):
+        return [
+            int(x) for x in raw_array if isinstance(x, int) and not isinstance(x, bool)
+        ]
+    single = payload.get("peerId")
+    if isinstance(single, int) and not isinstance(single, bool) and single != 0:
+        return [single]
+    return []
+
+
+def _build_action_summary(
+    metadata: dict,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+    author_id: Optional[int] = None,
+) -> str:
+    """Build a human-readable summary string for a service-action attachment.
+
+    ``metadata`` is the dict stored on the :class:`Attachment` by
+    :func:`telegram_message_exporter.postbox._action_attachment`.
+    ``author_id`` is the message author's peer id, used to resolve the
+    joiner name for ``peerJoined`` / ``joinedByRequest`` / ``joinedByLink``.
+    """
+    raw_type = metadata.get("raw_type")
+    payload = metadata.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if raw_type == TelegramMediaActionType.GROUP_CREATED:
+        return _summary_group_created(payload)
+    if raw_type == TelegramMediaActionType.ADDED_MEMBERS:
+        return _summary_added_members(payload, peer_map)
+    if raw_type == TelegramMediaActionType.REMOVED_MEMBERS:
+        return _summary_removed_members(payload, peer_map)
+    if raw_type == TelegramMediaActionType.TITLE_UPDATED:
+        return _summary_title_updated(payload)
+    if raw_type == TelegramMediaActionType.PINNED_MESSAGE_UPDATED:
+        return "Pinned a message"
+    if raw_type == TelegramMediaActionType.JOINED_BY_LINK:
+        return _summary_joined_by_link(payload, peer_map, author_id)
+    if raw_type == TelegramMediaActionType.MESSAGE_AUTOREMOVE_TIMEOUT_UPDATED:
+        return _summary_autoremove(payload)
+    if raw_type == TelegramMediaActionType.PHONE_CALL:
+        return _summary_phone_call(payload)
+    if raw_type == TelegramMediaActionType.CUSTOM_TEXT:
+        return _summary_custom_text(payload)
+    if raw_type == TelegramMediaActionType.PEER_JOINED:
+        return _summary_peer_joined(peer_map, author_id)
+    if raw_type == TelegramMediaActionType.GROUP_PHONE_CALL:
+        return _summary_group_phone_call(payload)
+    if raw_type == TelegramMediaActionType.INVITE_TO_GROUP_PHONE_CALL:
+        return _summary_invite_to_group_call(payload, peer_map)
+    if raw_type == TelegramMediaActionType.SET_CHAT_THEME:
+        return _summary_set_chat_theme(metadata, payload)
+    if raw_type == TelegramMediaActionType.JOINED_BY_REQUEST:
+        return _summary_joined_by_request(peer_map, author_id)
+    if raw_type == TelegramMediaActionType.CONFERENCE_CALL:
+        return _summary_conference_call(payload, peer_map)
+    fallback = metadata.get("summary")
+    if isinstance(fallback, str):
+        return fallback
+    return ""
+
+
+def _summary_group_created(payload: dict) -> str:
+    title = payload.get("title")
+    if isinstance(title, str) and title:
+        return f"Group {title} was created"
+    return "Group was created"
+
+
+def _summary_added_members(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    names = _join_peer_names_md(_decode_payload_peer_ids(payload), peer_map)
+    if names:
+        return f"Added {names}"
+    return "Added members"
+
+
+def _summary_removed_members(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    names = _join_peer_names_md(_decode_payload_peer_ids(payload), peer_map)
+    if names:
+        return f"Removed {names}"
+    return "Removed members"
+
+
+def _summary_title_updated(payload: dict) -> str:
+    title = payload.get("title")
+    if isinstance(title, str) and title:
+        return f"Title changed to {title}"
+    return "Title changed"
+
+
+def _summary_joined_by_link(
+    payload: dict,
+    peer_map: Optional[dict[int, PeerInfo]],
+    author_id: Optional[int],
+) -> str:
+    joiner = _join_label(peer_map, author_id)
+    inviter_raw = payload.get("inviter")
+    inviter_id = (
+        int(inviter_raw)
+        if isinstance(inviter_raw, int)
+        and not isinstance(inviter_raw, bool)
+        and inviter_raw != 0
+        else None
+    )
+    base = f"{joiner} joined via invite link"
+    if (
+        inviter_id is not None
+        and peer_map is not None
+        and inviter_id != author_id
+        and inviter_id in peer_map
+    ):
+        inviter_label = _peer_label(inviter_id, peer_map)
+        return f"{base} from {inviter_label}"
+    return base
+
+
+def _summary_joined_by_request(
+    peer_map: Optional[dict[int, PeerInfo]], author_id: Optional[int]
+) -> str:
+    return f"{_join_label(peer_map, author_id)} joined via request"
+
+
+def _summary_peer_joined(
+    peer_map: Optional[dict[int, PeerInfo]], author_id: Optional[int]
+) -> str:
+    return f"{_join_label(peer_map, author_id)} joined"
+
+
+def _join_label(
+    peer_map: Optional[dict[int, PeerInfo]], author_id: Optional[int]
+) -> str:
+    if author_id is None:
+        return "Member"
+    return _peer_label(author_id, peer_map)
+
+
+def _summary_autoremove(payload: dict) -> str:
+    period = payload.get("t")
+    if isinstance(period, int) and not isinstance(period, bool):
+        return f"Auto-delete: {_format_autoremove_period(period)}"
+    return "Auto-delete updated"
+
+
+def _summary_phone_call(payload: dict) -> str:
+    is_video = bool(payload.get("vc"))
+    kind = "Video call" if is_video else "Voice call"
+    duration = payload.get("d")
+    reason_raw = payload.get("dr")
+    reason_int = (
+        int(reason_raw)
+        if isinstance(reason_raw, int) and not isinstance(reason_raw, bool)
+        else None
+    )
+    reason_label = _format_phone_call_label(reason_int)
+    parts: list[str] = [f"📞 {kind}"]
+    if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
+        parts.append(_format_duration(duration))
+    parts.append(reason_label)
+    return " · ".join(parts)
+
+
+def _summary_custom_text(payload: dict) -> str:
+    text = payload.get("text")
+    if isinstance(text, str) and text:
+        return text
+    return "Custom text"
+
+
+def _summary_set_chat_theme(metadata: dict, payload: dict) -> str:
+    emoticon = metadata.get("emoticon")
+    if isinstance(emoticon, str) and emoticon:
+        return f"Theme: {emoticon}"
+    return "Theme updated"
+
+
+def _summary_group_phone_call(payload: dict) -> str:
+    duration = payload.get("duration")
+    schedule = payload.get("scheduleDate")
+    if isinstance(schedule, int) and not isinstance(schedule, bool) and schedule > 0:
+        scheduled = datetime.fromtimestamp(schedule, tz=timezone.utc)
+        return f"🎙️ Voice chat scheduled for {scheduled.isoformat()}"
+    if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
+        return f"🎙️ Voice chat ended · {_format_duration(duration)}"
+    return "🎙️ Voice chat started"
+
+
+def _summary_invite_to_group_call(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    names = _join_peer_names_md(_decode_payload_peer_ids(payload), peer_map)
+    if names:
+        return f"Invited {names} to a voice chat"
+    return "Invited members to a voice chat"
+
+
+def _summary_conference_call(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    flags = _format_conference_flags(payload.get("flags", 0))
+    duration = payload.get("dur")
+    parts: list[str] = ["📹 Conference call"]
+    if flags.get("is_missed"):
+        return "📹 Missed conference call"
+    if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
+        parts.append(_format_duration(duration))
+    if flags.get("is_active"):
+        parts.append("active")
+    other = _decode_payload_peer_ids({"peerIds": payload.get("part")})
+    if other:
+        parts.append(f"with {_join_peer_names_md(other, peer_map)}")
+    return " · ".join(parts)
+
+
+def _render_html_service_message(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+    author_id: Optional[int] = None,
+) -> None:
+    """Render a service-action attachment as an HTML ``<div class="service-msg">``."""
+    metadata = attachment.metadata or {}
+    raw_type = metadata.get("raw_type")
+    payload = metadata.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if raw_type == TelegramMediaActionType.CUSTOM_TEXT:
+        text = payload.get("text")
+        if isinstance(text, str) and text:
+            _render_html_service_div(handle, linkify_html(text))
+        else:
+            _render_html_service_div(handle, "")
+        return
+
+    _SUMMARY_TYPES = frozenset(
+        (
+            TelegramMediaActionType.GROUP_CREATED,
+            TelegramMediaActionType.TITLE_UPDATED,
+            TelegramMediaActionType.PINNED_MESSAGE_UPDATED,
+            TelegramMediaActionType.MESSAGE_AUTOREMOVE_TIMEOUT_UPDATED,
+            TelegramMediaActionType.PHONE_CALL,
+            TelegramMediaActionType.GROUP_PHONE_CALL,
+            TelegramMediaActionType.SET_CHAT_THEME,
+            TelegramMediaActionType.CONFERENCE_CALL,
+        )
+    )
+    if raw_type in _SUMMARY_TYPES:
+        _render_html_service_summary(
+            handle, _build_action_summary(metadata, peer_map, author_id)
+        )
+        return
+
+    if raw_type == TelegramMediaActionType.ADDED_MEMBERS:
+        html_body = _render_added_removed_html(
+            "Added", _decode_payload_peer_ids(payload), peer_map, "Added members"
+        )
+    elif raw_type == TelegramMediaActionType.REMOVED_MEMBERS:
+        html_body = _render_added_removed_html(
+            "Removed", _decode_payload_peer_ids(payload), peer_map, "Removed members"
+        )
+    elif raw_type == TelegramMediaActionType.JOINED_BY_LINK:
+        html_body = _render_joined_by_link_html(payload, peer_map, author_id)
+    elif raw_type == TelegramMediaActionType.PEER_JOINED:
+        html_body = _render_simple_join_html(" joined", peer_map, author_id)
+    elif raw_type == TelegramMediaActionType.INVITE_TO_GROUP_PHONE_CALL:
+        html_body = _render_invite_to_call_html(
+            payload, peer_map, "Invited members to a voice chat"
+        )
+    elif raw_type == TelegramMediaActionType.JOINED_BY_REQUEST:
+        html_body = _render_simple_join_html(" joined via request", peer_map, author_id)
+    else:
+        summary = _build_action_summary(metadata, peer_map, author_id)
+        if summary:
+            _render_html_service_summary(handle, summary)
+        else:
+            handle.write('<div class="service-msg"></div>')
+        return
+
+    _render_html_service_div(handle, html_body)
+
+
+def _render_added_removed_html(
+    verb: str,
+    peer_ids: list[int],
+    peer_map: Optional[dict[int, PeerInfo]],
+    fallback: str,
+) -> str:
+    names = _join_peer_names_html(peer_ids, peer_map)
+    if names:
+        return f"{verb} {names}"
+    return fallback
+
+
+def _render_simple_join_html(
+    suffix: str,
+    peer_map: Optional[dict[int, PeerInfo]],
+    author_id: Optional[int],
+) -> str:
+    label = _join_label(peer_map, author_id)
+    if author_id is None:
+        return f"Member{suffix}"
+    url = _peer_url_for(author_id, peer_map)
+    return f"{_html_link(label, url)}{suffix}"
+
+
+def _render_joined_by_link_html(
+    payload: dict,
+    peer_map: Optional[dict[int, PeerInfo]],
+    author_id: Optional[int],
+) -> str:
+    joiner_url = (
+        _peer_url_for(author_id, peer_map)
+        if author_id is not None and peer_map is not None
+        else None
+    )
+    joiner_html = _html_link(_join_label(peer_map, author_id), joiner_url)
+    base = f"{joiner_html} joined via invite link"
+    inviter_raw = payload.get("inviter")
+    inviter_id = (
+        int(inviter_raw)
+        if isinstance(inviter_raw, int)
+        and not isinstance(inviter_raw, bool)
+        and inviter_raw != 0
+        else None
+    )
+    if (
+        inviter_id is not None
+        and inviter_id != author_id
+        and peer_map is not None
+        and inviter_id in peer_map
+    ):
+        inviter_label = _peer_label(inviter_id, peer_map)
+        inviter_url = _peer_url_for(inviter_id, peer_map)
+        return f"{base} from {_html_link(inviter_label, inviter_url)}"
+    return base
+
+
+def _render_invite_to_call_html(
+    payload: dict,
+    peer_map: Optional[dict[int, PeerInfo]],
+    fallback: str,
+) -> str:
+    names = _join_peer_names_html(_decode_payload_peer_ids(payload), peer_map)
+    if names:
+        return f"Invited {names} to a voice chat"
+    return fallback
+
+
+def _render_html_service_summary(handle, summary: str) -> None:
+    for emoji in ("📞", "🎙️", "📹"):
+        if emoji in summary:
+            head, _, tail = summary.partition(emoji)
+            inner = (
+                f"{html.escape(head)}"
+                f'<span class="service-emoji">{emoji}</span>'
+                f"{html.escape(tail)}"
+            )
+            _render_html_service_div(handle, inner)
+            return
+    _render_html_service_div(handle, html.escape(summary))
+
+
+def _render_html_service_div(handle, inner_html: str) -> None:
+    handle.write(f'<div class="service-msg">{inner_html}</div>')
+
+
+def _render_markdown_service_message(
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+    author_id: Optional[int] = None,
+) -> str:
+    """Render a service-action attachment as a single italic Markdown line."""
+    metadata = attachment.metadata or {}
+    raw_type = metadata.get("raw_type")
+    payload = metadata.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if raw_type == TelegramMediaActionType.ADDED_MEMBERS:
+        return _md_join_line(
+            "Added", _decode_payload_peer_ids(payload), peer_map, "Added members"
+        )
+    if raw_type == TelegramMediaActionType.REMOVED_MEMBERS:
+        return _md_join_line(
+            "Removed", _decode_payload_peer_ids(payload), peer_map, "Removed members"
+        )
+    if raw_type == TelegramMediaActionType.JOINED_BY_LINK:
+        return _md_joined_by_link(payload, peer_map, author_id)
+    if raw_type == TelegramMediaActionType.PEER_JOINED:
+        return _md_simple_join(" joined", peer_map, author_id)
+    if raw_type == TelegramMediaActionType.INVITE_TO_GROUP_PHONE_CALL:
+        names = _join_peer_names_md(_decode_payload_peer_ids(payload), peer_map)
+        if names:
+            return f"Invited {names} to a voice chat"
+        return "Invited members to a voice chat"
+    if raw_type == TelegramMediaActionType.JOINED_BY_REQUEST:
+        return _md_simple_join(" joined via request", peer_map, author_id)
+    if raw_type == TelegramMediaActionType.CUSTOM_TEXT:
+        text = payload.get("text")
+        if isinstance(text, str) and text:
+            return linkify_markdown(text)
+        return ""
+    summary = _build_action_summary(metadata, peer_map, author_id)
+    return summary
+
+
+def _md_join_line(
+    verb: str,
+    peer_ids: list[int],
+    peer_map: Optional[dict[int, PeerInfo]],
+    fallback: str,
+) -> str:
+    names = _join_peer_names_md(peer_ids, peer_map)
+    if names:
+        return f"{verb} {names}"
+    return fallback
+
+
+def _md_simple_join(
+    suffix: str,
+    peer_map: Optional[dict[int, PeerInfo]],
+    author_id: Optional[int],
+) -> str:
+    label = _join_label(peer_map, author_id)
+    if author_id is None:
+        return f"Member{suffix}"
+    url = _peer_url_for(author_id, peer_map)
+    return f"{_md_link(label, url)}{suffix}"
+
+
+def _md_joined_by_link(
+    payload: dict,
+    peer_map: Optional[dict[int, PeerInfo]],
+    author_id: Optional[int],
+) -> str:
+    joiner_url = (
+        _peer_url_for(author_id, peer_map)
+        if author_id is not None and peer_map is not None
+        else None
+    )
+    joiner_md = _md_link(_join_label(peer_map, author_id), joiner_url)
+    base = f"{joiner_md} joined via invite link"
+    inviter_raw = payload.get("inviter")
+    inviter_id = (
+        int(inviter_raw)
+        if isinstance(inviter_raw, int)
+        and not isinstance(inviter_raw, bool)
+        and inviter_raw != 0
+        else None
+    )
+    if (
+        inviter_id is not None
+        and inviter_id != author_id
+        and peer_map is not None
+        and inviter_id in peer_map
+    ):
+        inviter_label = _peer_label(inviter_id, peer_map)
+        inviter_url = _peer_url_for(inviter_id, peer_map)
+        return f"{base} from {_md_link(inviter_label, inviter_url)}"
+    return base
+
+
 def _render_markdown_attachment(
     attachment: Attachment,
     peer_map: Optional[dict[int, PeerInfo]] = None,
+    author_id: Optional[int] = None,
 ) -> str:
     if attachment.kind == "webpage" and attachment.metadata:
         return _render_markdown_webpage_preview(attachment)
+    if attachment.kind == "action":
+        return _render_markdown_service_message(attachment, peer_map, author_id)
     label = _attachment_label(attachment)
     if attachment.url:
         return f"[{label}]({attachment.url})"
@@ -1244,7 +1837,9 @@ def render_markdown(
             if msg.text:
                 handle.write(f"{linkify_markdown(msg.text)}\n\n")
             for attachment in msg.attachments:
-                handle.write(f"{_render_markdown_attachment(attachment, peer_map)}\n\n")
+                handle.write(
+                    f"{_render_markdown_attachment(attachment, peer_map, msg.author_id)}\n\n"
+                )
             poll_note = _render_poll_question_note_markdown(msg)
             if poll_note:
                 handle.write(f"{poll_note}\n\n")
@@ -1304,6 +1899,18 @@ def render_csv(
                                 "source_path": attachment.source_path,
                                 "url": attachment.url,
                                 "metadata": attachment.metadata,
+                                **(
+                                    {
+                                        "action_summary": _build_action_summary(
+                                            attachment.metadata or {},
+                                            peer_map,
+                                            msg.author_id,
+                                        )
+                                    }
+                                    if attachment.kind == "action"
+                                    and attachment.metadata
+                                    else {}
+                                ),
                             }
                             for attachment in msg.attachments
                         ],
@@ -1543,7 +2150,7 @@ def _render_messages(
         if msg.text:
             handle.write(linkify_html(msg.text))
         for attachment in msg.attachments:
-            _render_html_attachment(handle, attachment, peer_map)
+            _render_html_attachment(handle, attachment, peer_map, msg.author_id)
         _render_poll_question_note_html(handle, msg)
         handle.write("</div></div>")
     handle.write("</div>")
@@ -1556,12 +2163,16 @@ def _render_html_attachment(
     handle,
     attachment: Attachment,
     peer_map: Optional[dict[int, PeerInfo]] = None,
+    author_id: Optional[int] = None,
 ) -> None:
     if attachment.kind == "webpage" and attachment.metadata:
         _render_html_webpage_preview(handle, attachment)
         return
     if attachment.kind == "poll" and attachment.metadata:
         _render_html_poll(handle, attachment.metadata, peer_map)
+        return
+    if attachment.kind == "action":
+        _render_html_service_message(handle, attachment, peer_map, author_id)
         return
     label = html.escape(_attachment_label(attachment))
     if attachment.url:
