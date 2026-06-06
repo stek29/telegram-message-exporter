@@ -7,12 +7,12 @@ import html
 import json
 import shutil
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from .models import Attachment, Message
-from .utils import linkify_html, linkify_markdown
+from .utils import linkify_html, linkify_markdown, to_local
 
 HTML_BOOTSTRAP = (
     '<link rel="stylesheet" '
@@ -186,6 +186,7 @@ header.header-panel {
   text-transform: uppercase;
   font-size: 12px;
   letter-spacing: 0.12em;
+  text-align: center;
 }
 .msg { display: flex; margin: 12px 0; gap: 10px; }
 .msg.out { justify-content: flex-end; }
@@ -203,6 +204,22 @@ header.header-panel {
 .msg.out .bubble { background: var(--bubble-out); }
 .bubble img, .bubble video { max-width: 100%; height: auto; border-radius: 10px; }
 .bubble audio { width: min(420px, 100%); }
+.video-message {
+  position: relative;
+  width: min(280px, 100%);
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #000;
+  box-shadow: 0 8px 22px rgba(2, 6, 23, 0.5);
+}
+.video-message video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
 .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .forwarded {
   padding-left: 8px;
@@ -230,6 +247,48 @@ a:hover { text-decoration: underline; }
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
 .back-top.show { opacity: 1; transform: translateY(0); }
+.poll {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+}
+.poll-question { font-weight: 600; margin-bottom: 6px; }
+.poll-meta { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.poll-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  margin: 3px 0;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.08);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.poll-option.correct { background: rgba(34, 197, 94, 0.18); }
+.poll-option.selected { border: 1px solid var(--accent); }
+.poll-option .text { flex: 1 1 auto; min-width: 0; }
+.poll-option .count {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.poll-option .recent {
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+  flex-basis: 100%;
+}
+.poll-solution {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-left: 2px solid #22c55e;
+  font-size: 12px;
+  color: #bbf7d0;
+}
 """
 
 
@@ -238,10 +297,10 @@ class HtmlStats:
     """Computed stats for HTML output."""
 
     message_count: int
-    date_range: str
+    start_iso: Optional[str]
+    end_iso: Optional[str]
     participants: str
     exported_at: str
-    day_entries: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -250,6 +309,7 @@ class RenderOptions:
 
     peer_map: Optional[dict[int, str]] = None
     show_direction: bool = False
+    tz: Optional[object] = None
 
 
 def copy_message_media(
@@ -335,31 +395,54 @@ def _resolve_peer_name(
     return peer_map.get(peer_id)
 
 
-def _forwarded_from(
+def _forwarded_from_parts(
     msg: Message,
     peer_map: Optional[dict[int, str]],
-) -> Optional[str]:
+    tz: Optional[object] = None,
+) -> list[tuple[str, object]]:
+    """Return forwarded-info as a list of (kind, value) fragments.
+
+    kind is "text" (plain text) or "time" (value is the original UTC datetime).
+    """
     info = msg.forward_info
     if info is None:
-        return None
+        return []
 
+    parts: list[tuple[str, object]] = []
     author = _resolve_peer_name(info.author_id, peer_map)
     source = _resolve_peer_name(info.source_id, peer_map)
     origin = author or info.author_signature or source
     if origin is None:
         origin_id = info.author_id or info.source_id
         origin = f"peer {origin_id}" if origin_id is not None else "Unknown"
-
-    details = [f"Forwarded from {origin}"]
+    parts.append(("text", f"Forwarded from {origin}"))
     if source and source != origin:
-        details.append(f"source: {source}")
+        parts.append(("text", f"source: {source}"))
     if info.date:
-        details.append(info.date.strftime("%Y-%m-%d %H:%M:%S"))
+        parts.append(("time", info.date))
     if info.psa_type:
-        details.append(f"PSA: {info.psa_type}")
+        parts.append(("text", f"PSA: {info.psa_type}"))
     if info.is_imported:
-        details.append("imported")
-    return " | ".join(details)
+        parts.append(("text", "imported"))
+    return parts
+
+
+def _forwarded_from(
+    msg: Message,
+    peer_map: Optional[dict[int, str]],
+    tz: Optional[object] = None,
+) -> Optional[str]:
+    parts = _forwarded_from_parts(msg, peer_map, tz)
+    if not parts:
+        return None
+    rendered: list[str] = []
+    for kind, value in parts:
+        if kind == "text":
+            rendered.append(str(value))
+        else:
+            local_date = to_local(value, tz) if tz else value
+            rendered.append(local_date.isoformat())
+    return " | ".join(rendered)
 
 
 def _attachment_label(attachment: Attachment) -> str:
@@ -377,7 +460,10 @@ def _attachment_description(attachment: Attachment) -> str:
     return " | ".join(details)
 
 
-def _render_markdown_attachment(attachment: Attachment) -> str:
+def _render_markdown_attachment(
+    attachment: Attachment,
+    peer_map: Optional[dict[int, str]] = None,
+) -> str:
     label = _attachment_label(attachment)
     if attachment.url:
         return f"[{label}]({attachment.url})"
@@ -385,7 +471,160 @@ def _render_markdown_attachment(attachment: Attachment) -> str:
         if attachment.kind == "image":
             return f"![{label}]({attachment.exported_path})"
         return f"[{label}]({attachment.exported_path})"
+    if attachment.kind == "poll" and attachment.metadata:
+        return _render_markdown_poll(attachment.metadata, peer_map)
     return f"`[{_attachment_description(attachment)}]`"
+
+
+def _peer_names(peer_ids: list[int], peer_map: Optional[dict[int, str]]) -> list[str]:
+    names: list[str] = []
+    for peer_id in peer_ids:
+        name = peer_map.get(peer_id) if peer_map else None
+        names.append(name or f"peer {peer_id}")
+    return names
+
+
+def _poll_percentages(metadata: dict) -> list[Optional[float]]:
+    options = metadata.get("options") or []
+    counts: list[Optional[int]] = [opt.get("vote_count") for opt in options]
+    valid = [c for c in counts if isinstance(c, int)]
+    total = sum(valid) if valid else None
+    result: list[Optional[float]] = []
+    for count in counts:
+        if count is None or total in (None, 0):
+            result.append(None)
+        else:
+            result.append(round(count * 100.0 / total, 1))
+    return result
+
+
+def _render_markdown_poll(
+    metadata: dict,
+    peer_map: Optional[dict[int, str]] = None,
+) -> str:
+    question = (metadata.get("question") or "").strip() or "(no question)"
+    kind = metadata.get("kind", "poll")
+    multiple_answers = bool(metadata.get("multiple_answers"))
+    publicity = metadata.get("publicity", "anonymous")
+    is_closed = bool(metadata.get("is_closed"))
+    total_voters = metadata.get("total_voters")
+    options = metadata.get("options") or []
+    solution = metadata.get("solution")
+    percentages = _poll_percentages(metadata)
+    show_correct = kind == "quiz" and is_closed
+
+    tags: list[str] = []
+    tags.append("Quiz" if kind == "quiz" else "Poll")
+    if multiple_answers:
+        tags.append("multiple answers")
+    tags.append("public" if publicity == "public" else "anonymous")
+    if is_closed:
+        tags.append("closed")
+    if isinstance(total_voters, int):
+        tags.append(f"{total_voters} votes")
+    header = f"**Poll:** {question}\n\n*({' • '.join(tags)})*\n"
+
+    lines: list[str] = []
+    for index, option in enumerate(options):
+        text = (option.get("text") or "").strip() or "(empty)"
+        vote_count = option.get("vote_count")
+        recent = option.get("recent_voters") or []
+        percent = percentages[index]
+        markers: list[str] = []
+        if option.get("is_correct") and show_correct:
+            markers.append("✓ correct")
+        if option.get("selected"):
+            markers.append("you voted")
+        marker = f" *({' / '.join(markers)})*" if markers else ""
+        if isinstance(vote_count, int) and percent is not None:
+            count_part = f"{vote_count} ({percent}%)"
+        elif isinstance(vote_count, int):
+            count_part = f"{vote_count}"
+        else:
+            count_part = "—"
+        line = f"- {text} — {count_part}{marker}"
+        if recent:
+            line += f"  \n  *Recent voters: {', '.join(_peer_names(recent, peer_map))}*"
+        lines.append(line)
+
+    body = "\n".join(lines)
+    result = f"{header}\n{body}"
+    if solution and is_closed:
+        result += f"\n\n**Solution:** {solution}"
+    return result
+
+
+def _render_html_poll(
+    handle,
+    metadata: dict,
+    peer_map: Optional[dict[int, str]],
+) -> None:
+    question = (metadata.get("question") or "").strip() or "(no question)"
+    kind = metadata.get("kind", "poll")
+    multiple_answers = bool(metadata.get("multiple_answers"))
+    publicity = metadata.get("publicity", "anonymous")
+    is_closed = bool(metadata.get("is_closed"))
+    total_voters = metadata.get("total_voters")
+    options = metadata.get("options") or []
+    solution = metadata.get("solution")
+    percentages = _poll_percentages(metadata)
+    show_correct = kind == "quiz" and is_closed
+
+    tags: list[str] = []
+    tags.append("Quiz" if kind == "quiz" else "Poll")
+    if multiple_answers:
+        tags.append("multiple answers")
+    tags.append("public" if publicity == "public" else "anonymous")
+    if is_closed:
+        tags.append("closed")
+    if isinstance(total_voters, int):
+        tags.append(f"{total_voters} votes")
+
+    handle.write('<div class="poll">')
+    handle.write(f'<div class="poll-question">{html.escape(question)}</div>')
+    handle.write(f'<div class="poll-meta">{html.escape(" • ".join(tags))}</div>')
+    for index, option in enumerate(options):
+        text = (option.get("text") or "").strip() or "(empty)"
+        vote_count = option.get("vote_count")
+        recent = option.get("recent_voters") or []
+        percent = percentages[index]
+        classes = ["poll-option"]
+        if option.get("is_correct") and show_correct:
+            classes.append("correct")
+        if option.get("selected"):
+            classes.append("selected")
+        class_attr = html.escape(" ".join(classes), quote=True)
+        handle.write(f'<div class="{class_attr}">')
+        handle.write(f'<span class="text">{html.escape(text)}</span>')
+        if isinstance(vote_count, int) and percent is not None:
+            count_text = f"{vote_count} ({percent}%)"
+        elif isinstance(vote_count, int):
+            count_text = f"{vote_count}"
+        else:
+            count_text = "—"
+        handle.write(f'<span class="count">{html.escape(count_text)}</span>')
+        markers: list[str] = []
+        if option.get("is_correct") and show_correct:
+            markers.append("✓ correct")
+        if option.get("selected"):
+            markers.append("you voted")
+        if markers:
+            handle.write(
+                f'<span class="count">{html.escape(" • ".join(markers))}</span>'
+            )
+        if recent:
+            recent_names = ", ".join(_peer_names(recent, peer_map))
+            handle.write(
+                f'<span class="recent">Recent voters: '
+                f"{html.escape(recent_names)}</span>"
+            )
+        handle.write("</div>")
+    if solution and is_closed:
+        handle.write(
+            f'<div class="poll-solution"><strong>Solution:</strong> '
+            f"{html.escape(solution)}</div>"
+        )
+    handle.write("</div>")
 
 
 def build_html_stats(
@@ -397,23 +636,6 @@ def build_html_stats(
     timestamps = [msg.timestamp for msg in messages if msg.timestamp]
     start = min(timestamps) if timestamps else None
     end = max(timestamps) if timestamps else None
-    if start and end:
-        date_range = f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}"
-    else:
-        date_range = "—"
-
-    day_entries: list[tuple[str, str]] = []
-    current_day = None
-    for msg in messages:
-        if msg.timestamp:
-            day_key = msg.timestamp.strftime("%Y-%m-%d")
-            day_label = msg.timestamp.strftime("%A, %B %d, %Y")
-        else:
-            day_key = "unknown"
-            day_label = "Unknown Date"
-        if day_key != current_day:
-            current_day = day_key
-            day_entries.append((day_key, day_label))
 
     participant_names: list[str] = []
     for msg in messages:
@@ -423,13 +645,13 @@ def build_html_stats(
     if title not in participant_names:
         participant_names.append(title)
     participants = " • ".join(participant_names)
-    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    exported_at = datetime.now(tz=timezone.utc).isoformat()
     return HtmlStats(
         message_count=len(messages),
-        date_range=date_range,
+        start_iso=start.isoformat() if start else None,
+        end_iso=end.isoformat() if end else None,
         participants=participants,
         exported_at=exported_at,
-        day_entries=tuple(day_entries),
     )
 
 
@@ -443,34 +665,28 @@ def render_markdown(
     options = options or RenderOptions()
     peer_map = options.peer_map
     show_direction = options.show_direction
+    tz = options.tz
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
         handle.write(f"# Telegram Chat History: {title}\n\n")
-        handle.write(
-            f"**Exported:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        )
+        handle.write(f"**Exported:** {datetime.now(tz=timezone.utc).isoformat()}\n\n")
         handle.write(f"**Total Messages:** {len(messages)}\n\n")
         handle.write("---\n")
 
         current_date = None
         for msg in messages:
-            if msg.timestamp:
-                msg_date = msg.timestamp.strftime("%Y-%m-%d")
+            local_ts = to_local(msg.timestamp, tz) if tz else msg.timestamp
+            if local_ts:
+                msg_date = local_ts.strftime("%Y-%m-%d")
             else:
                 msg_date = "Unknown Date"
 
             if current_date != msg_date:
                 current_date = msg_date
-                header = (
-                    msg.timestamp.strftime("%A, %B %d, %Y")
-                    if msg.timestamp
-                    else "Unknown"
-                )
+                header = local_ts.strftime("%A, %B %d, %Y") if local_ts else "Unknown"
                 handle.write(f"\n## {header}\n\n")
 
-            time_str = (
-                msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else "??:??:??"
-            )
+            time_str = local_ts.isoformat() if local_ts else "??:??:??"
             speaker = resolve_speaker(msg, peer_map)
 
             direction = ""
@@ -478,19 +694,23 @@ def render_markdown(
                 direction = f" ({msg.speaker_hint()})"
 
             handle.write(f"**{time_str} — {speaker}{direction}**\n\n")
-            forwarded_from = _forwarded_from(msg, peer_map)
+            forwarded_from = _forwarded_from(msg, peer_map, tz)
             if forwarded_from:
                 handle.write(f"*{forwarded_from}*\n\n")
             if msg.text:
                 handle.write(f"{linkify_markdown(msg.text)}\n\n")
             for attachment in msg.attachments:
-                handle.write(f"{_render_markdown_attachment(attachment)}\n\n")
+                handle.write(f"{_render_markdown_attachment(attachment, peer_map)}\n\n")
+            poll_note = _render_poll_question_note_markdown(msg)
+            if poll_note:
+                handle.write(f"{poll_note}\n\n")
 
 
 def render_csv(
     messages: list[Message],
     out_path: Path,
     peer_map: Optional[dict[int, str]] = None,
+    tz: Optional[object] = None,
 ) -> None:
     """Export messages to CSV."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -511,9 +731,9 @@ def render_csv(
             ]
         )
         for msg in messages:
-            ts = msg.timestamp
-            date_str = ts.strftime("%Y-%m-%d") if ts else ""
-            time_str = ts.strftime("%H:%M:%S") if ts else ""
+            ts = to_local(msg.timestamp, tz) if tz else msg.timestamp
+            date_str = ts.date().isoformat() if ts else ""
+            time_str = ts.time().isoformat() if ts else ""
             timestamp = int(ts.timestamp()) if ts else ""
             speaker = resolve_speaker(msg, peer_map)
             writer.writerow(
@@ -537,6 +757,7 @@ def render_csv(
                                 ),
                                 "source_path": attachment.source_path,
                                 "url": attachment.url,
+                                "metadata": attachment.metadata,
                             }
                             for attachment in msg.attachments
                         ],
@@ -563,9 +784,13 @@ def render_csv(
                                     msg.forward_info.source_message_id
                                 ),
                                 "date": (
-                                    msg.forward_info.date.isoformat()
-                                    if msg.forward_info.date
-                                    else None
+                                    to_local(msg.forward_info.date, tz).isoformat()
+                                    if msg.forward_info.date and tz
+                                    else (
+                                        msg.forward_info.date.isoformat()
+                                        if msg.forward_info.date
+                                        else None
+                                    )
                                 ),
                                 "author_signature": (msg.forward_info.author_signature),
                                 "psa_type": msg.forward_info.psa_type,
@@ -606,10 +831,36 @@ def render_html(
         handle.write('<div class="container">')
         _render_header(handle, title)
         _render_stats(handle, stats)
-        _render_toolbar(handle, stats.day_entries)
+        _render_toolbar(handle)
         _render_messages(handle, messages, peer_map)
         _render_footer(handle)
         handle.write("</div></body></html>")
+
+
+def _primary_poll_question(msg: Message) -> Optional[str]:
+    """Return the question text of the first poll attachment, if any."""
+    for attachment in msg.attachments:
+        if attachment.kind == "poll" and attachment.metadata:
+            question = attachment.metadata.get("question")
+            if isinstance(question, str):
+                return question.strip()
+    return None
+
+
+def _render_poll_question_note_html(handle, msg: Message) -> None:
+    """Render the message text as a note when it differs from the poll question."""
+    poll_question = _primary_poll_question(msg)
+    if poll_question is None or not msg.text or poll_question == msg.text.strip():
+        return
+    handle.write(f'<div class="meta">{html.escape(msg.text)}</div>')
+
+
+def _render_poll_question_note_markdown(msg: Message) -> Optional[str]:
+    """Return the message text as a Markdown note when it differs from the poll question."""
+    poll_question = _primary_poll_question(msg)
+    if poll_question is None or not msg.text or poll_question == msg.text.strip():
+        return None
+    return f"_{msg.text}_"
 
 
 def _render_header(handle, title: str) -> None:
@@ -637,7 +888,13 @@ def _render_stats(handle, stats: HtmlStats) -> None:
     handle.write(
         '<div class="stat-card glass">'
         '<div class="stat-info"><span class="label">Date Range</span>'
-        f'<span class="value mono">{html.escape(stats.date_range)}</span></div></div>'
+        '<span class="value mono">'
+        f'<time class="local-date" datetime="{html.escape(stats.start_iso)}">'
+        f"{html.escape(stats.start_iso or '')}</time>"
+        " → "
+        f'<time class="local-date" datetime="{html.escape(stats.end_iso)}">'
+        f"{html.escape(stats.end_iso or '')}</time>"
+        "</span></div></div>"
     )
     handle.write(
         '<div class="stat-card glass">'
@@ -647,21 +904,18 @@ def _render_stats(handle, stats: HtmlStats) -> None:
     handle.write(
         '<div class="stat-card glass">'
         '<div class="stat-info"><span class="label">Exported</span>'
-        f'<span class="value mono">{stats.exported_at}</span></div></div>'
+        f'<span class="value mono">'
+        f'<time class="local-datetime" datetime="{html.escape(stats.exported_at)}">'
+        f"{html.escape(stats.exported_at)}</time></span></div></div>"
     )
     handle.write("</section>")
 
 
-def _render_toolbar(handle, day_entries: tuple[tuple[str, str], ...]) -> None:
+def _render_toolbar(handle) -> None:
     handle.write('<div class="toolbar glass">')
     handle.write('<label for="day-select">Jump to date</label>')
-    handle.write('<select id="day-select">')
-    handle.write('<option value="">Select a date...</option>')
-    for day_key, day_label in day_entries:
-        handle.write(
-            f'<option value="day-{html.escape(day_key)}">'
-            f"{html.escape(day_label)}</option>"
-        )
+    handle.write('<select id="day-select" disabled>')
+    handle.write('<option value="">Loading...</option>')
     handle.write("</select>")
     handle.write("</div>")
 
@@ -671,30 +925,32 @@ def _render_messages(
     messages: list[Message],
     peer_map: Optional[dict[int, str]],
 ) -> None:
-    handle.write('<div class="chat-card glass">')
-    current_date = None
+    handle.write('<div class="chat-card glass" id="chat-card">')
     for msg in messages:
-        msg_date, day_label, time_str = _message_date_parts(msg)
-        if current_date != msg_date:
-            current_date = msg_date
-            handle.write(
-                f'<div id="day-{html.escape(msg_date)}" class="day">'
-                f"{html.escape(day_label)}</div>"
-            )
+        iso = msg.timestamp.isoformat() if msg.timestamp else ""
+        time_str = msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else "??:??:??"
         speaker = resolve_speaker(msg, peer_map)
         direction = "out" if msg.outgoing is True else "in"
-        handle.write(f'<div class="msg {direction}">')
-        handle.write('<div class="bubble">')
-        handle.write(f'<div class="meta">[{time_str}] {html.escape(speaker)}</div>')
-        forwarded_from = _forwarded_from(msg, peer_map)
-        if forwarded_from:
-            handle.write(
-                f'<div class="meta forwarded">{html.escape(forwarded_from)}</div>'
+        if iso:
+            time_el = (
+                f'<time class="local-time" datetime="{html.escape(iso)}">'
+                f"{html.escape(time_str)}</time>"
             )
+        else:
+            time_el = "??:??:??"
+        handle.write(f'<div class="msg {direction}" data-iso="{html.escape(iso)}">')
+        handle.write('<div class="bubble">')
+        handle.write(f'<div class="meta">[{time_el}] {html.escape(speaker)}</div>')
+        forwarded_parts = _forwarded_from_parts(msg, peer_map)
+        if forwarded_parts:
+            handle.write('<div class="meta forwarded">')
+            _render_forwarded_html(handle, forwarded_parts)
+            handle.write("</div>")
         if msg.text:
             handle.write(linkify_html(msg.text))
         for attachment in msg.attachments:
-            _render_html_attachment(handle, attachment)
+            _render_html_attachment(handle, attachment, peer_map)
+        _render_poll_question_note_html(handle, msg)
         handle.write("</div></div>")
     handle.write("</div>")
 
@@ -702,7 +958,36 @@ def _render_messages(
     handle.write(_back_to_top_script())
 
 
-def _render_html_attachment(handle, attachment: Attachment) -> None:
+def _render_forwarded_html(
+    handle,
+    parts: list[tuple[str, object]],
+) -> None:
+    for index, (kind, value) in enumerate(parts):
+        if index > 0:
+            handle.write(" | ")
+        if kind == "text":
+            handle.write(html.escape(str(value)))
+        else:
+            dt = value
+            iso = dt.isoformat() if dt else ""
+            if iso:
+                handle.write(
+                    f'<time class="local-datetime" '
+                    f'datetime="{html.escape(iso)}">'
+                    f"{html.escape(iso)}</time>"
+                )
+            else:
+                handle.write("")
+
+
+def _render_html_attachment(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, str]] = None,
+) -> None:
+    if attachment.kind == "poll" and attachment.metadata:
+        _render_html_poll(handle, attachment.metadata, peer_map)
+        return
     label = html.escape(_attachment_label(attachment))
     if attachment.url:
         url = html.escape(attachment.url, quote=True)
@@ -718,6 +1003,11 @@ def _render_html_attachment(handle, attachment: Attachment) -> None:
             handle.write(
                 f'<div><img src="{path}" alt="{label}" loading="lazy" '
                 'decoding="async"></div>'
+            )
+        elif attachment.kind == "video_message":
+            handle.write(
+                f'<div class="video-message"><video controls preload="none" playsinline>'
+                f'<source src="{path}" type="{mime_type}"></video></div>'
             )
         elif attachment.kind == "video" or (
             attachment.kind == "sticker"
@@ -740,21 +1030,99 @@ def _render_html_attachment(handle, attachment: Attachment) -> None:
     )
 
 
-def _message_date_parts(msg: Message) -> tuple[str, str, str]:
-    if msg.timestamp:
-        msg_date = msg.timestamp.strftime("%Y-%m-%d")
-        day_label = msg.timestamp.strftime("%A, %B %d, %Y")
-        time_str = msg.timestamp.strftime("%H:%M:%S")
-    else:
-        msg_date = "unknown"
-        day_label = "Unknown Date"
-        time_str = "??:??:??"
-    return msg_date, day_label, time_str
-
-
 def _back_to_top_script() -> str:
     script = """
     <script>
+    (function() {
+      const formatTime = (iso) => {
+        const d = new Date(iso);
+        if (isNaN(d)) return iso;
+        return d.toLocaleTimeString(undefined, {
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour12: false
+        });
+      };
+      const formatDateTime = (iso) => {
+        const d = new Date(iso);
+        if (isNaN(d)) return iso;
+        return d.toLocaleString(undefined, {
+          year: 'numeric', month: 'short', day: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour12: false
+        });
+      };
+      const formatDayLabel = (d) => d.toLocaleDateString(undefined, {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+      });
+      const formatDateOnly = (d) => d.toLocaleDateString(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit'
+      });
+      const dayKey = (d) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `day-${y}-${m}-${day}`;
+      };
+
+      document.querySelectorAll('time.local-time').forEach(el => {
+        const iso = el.getAttribute('datetime');
+        if (iso) el.textContent = formatTime(iso);
+      });
+      document.querySelectorAll('time.local-datetime').forEach(el => {
+        const iso = el.getAttribute('datetime');
+        if (iso) el.textContent = formatDateTime(iso);
+      });
+      document.querySelectorAll('time.local-date').forEach(el => {
+        const iso = el.getAttribute('datetime');
+        if (iso) {
+          const d = new Date(iso);
+          if (!isNaN(d)) el.textContent = formatDateOnly(d);
+        }
+      });
+
+      const card = document.getElementById('chat-card');
+      const sel = document.getElementById('day-select');
+      if (card) {
+        const messages = Array.from(card.querySelectorAll('.msg[data-iso]'));
+        const dayEntries = [];
+        let lastKey = null;
+        messages.forEach(msg => {
+          const iso = msg.getAttribute('data-iso');
+          if (!iso) return;
+          const d = new Date(iso);
+          if (isNaN(d)) return;
+          const key = dayKey(d);
+          if (key !== lastKey) {
+            lastKey = key;
+            const label = formatDayLabel(d);
+            const header = document.createElement('div');
+            header.className = 'day day-header';
+            header.id = key;
+            header.setAttribute('data-day-key', key);
+            header.textContent = label;
+            card.insertBefore(header, msg);
+            dayEntries.push({ id: key, label: label, date: d });
+          }
+        });
+
+        if (sel) {
+          sel.innerHTML = '';
+          const placeholder = document.createElement('option');
+          placeholder.value = '';
+          placeholder.textContent = 'Select a date...';
+          sel.appendChild(placeholder);
+          dayEntries
+            .sort((a, b) => a.date - b.date)
+            .forEach(entry => {
+              const opt = document.createElement('option');
+              opt.value = entry.id;
+              opt.textContent = entry.label;
+              sel.appendChild(opt);
+            });
+          sel.disabled = false;
+        }
+      }
+    })();
     const sel = document.getElementById('day-select');
     if (sel) {
       sel.addEventListener('change', () => {

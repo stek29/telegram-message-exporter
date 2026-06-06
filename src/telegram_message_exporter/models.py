@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class Attachment:
     width: Optional[int] = None
     height: Optional[int] = None
     url: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

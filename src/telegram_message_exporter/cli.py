@@ -38,7 +38,7 @@ from .postbox import (
     load_peer_map,
 )
 from .schema import PostboxTable
-from .utils import parse_date_input
+from .utils import parse_date_input, resolve_timezone
 
 
 def cmd_decrypt(args: argparse.Namespace) -> None:
@@ -203,6 +203,8 @@ def cmd_export(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
 
+    tz = resolve_timezone(args.tz) if args.format != "html" else None
+
     if args.format == "md":
         render_markdown(
             messages,
@@ -211,10 +213,11 @@ def cmd_export(args: argparse.Namespace) -> None:
             options=RenderOptions(
                 peer_map=peer_map,
                 show_direction=args.show_direction,
+                tz=tz,
             ),
         )
     elif args.format == "csv":
-        render_csv(messages, out_path, peer_map=peer_map)
+        render_csv(messages, out_path, peer_map=peer_map, tz=tz)
     elif args.format == "html":
         render_html(messages, title, out_path, peer_map=peer_map)
     else:
@@ -325,6 +328,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument(
         "--show-direction", action="store_true", help="Append (in)/(out) labels"
+    )
+    export.add_argument(
+        "--tz",
+        help=(
+            "Timezone for md/csv exports (IANA name like 'Europe/Berlin' or "
+            "'UTC'). Defaults to system local. HTML always uses the viewer's "
+            "browser timezone."
+        ),
     )
     export.add_argument(
         "--debug",

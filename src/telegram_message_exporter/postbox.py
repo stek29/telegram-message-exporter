@@ -6,7 +6,7 @@ import enum
 import io
 import struct
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from .hashing import murmur_hash, persistent_hash32
@@ -525,16 +525,20 @@ def _resource_cache_key(resource: Any) -> Optional[str]:
     return None
 
 
+TELEGRAM_MEDIA_VIDEO_FLAG_INSTANT_ROUND_VIDEO = 1
+
+
 def _file_attribute_data(
     attributes: Any,
-) -> tuple[Optional[str], bool, bool, Optional[int], Optional[int]]:
+) -> tuple[Optional[str], bool, bool, bool, Optional[int], Optional[int]]:
     filename = None
     is_voice = False
     is_sticker = False
+    is_round_video = False
     width = None
     height = None
     if not isinstance(attributes, list):
-        return filename, is_voice, is_sticker, width, height
+        return filename, is_voice, is_sticker, is_round_video, width, height
     for attribute in attributes:
         if not isinstance(attribute, PostboxObject):
             continue
@@ -547,9 +551,15 @@ def _file_attribute_data(
         elif attribute_type == 4:
             width = fields.get("w")
             height = fields.get("h")
+            flags = fields.get("f")
+            if (
+                isinstance(flags, int)
+                and flags & TELEGRAM_MEDIA_VIDEO_FLAG_INSTANT_ROUND_VIDEO
+            ):
+                is_round_video = True
         elif attribute_type == 5:
             is_voice = bool(fields.get("iv"))
-    return filename, is_voice, is_sticker, width, height
+    return filename, is_voice, is_sticker, is_round_video, width, height
 
 
 def _object_resources(value: Any) -> list[Any]:
@@ -618,8 +628,8 @@ def media_attachments(media: Any) -> list[Attachment]:
     if media.type_name == "TelegramMediaFile":
         resource = fields.get("resource")
         resource_fields = resource.fields if isinstance(resource, PostboxObject) else {}
-        attr_filename, is_voice, is_sticker, width, height = _file_attribute_data(
-            fields.get("attributes")
+        attr_filename, is_voice, is_sticker, is_round_video, width, height = (
+            _file_attribute_data(fields.get("attributes"))
         )
         filename = resource_fields.get("file_name") or attr_filename
         mime_type = fields.get("mime_type")
@@ -627,6 +637,12 @@ def media_attachments(media: Any) -> list[Attachment]:
             kind = "sticker"
         elif is_voice:
             kind = "voice"
+        elif (
+            is_round_video
+            and isinstance(mime_type, str)
+            and mime_type.startswith("video/")
+        ):
+            kind = "video_message"
         elif isinstance(mime_type, str) and mime_type.startswith("video/"):
             kind = "video"
         elif isinstance(mime_type, str) and mime_type.startswith("audio/"):
@@ -691,7 +707,130 @@ def media_attachments(media: Any) -> list[Attachment]:
         url = fields.get("url") or fields.get("pending_url")
         return [Attachment(kind="webpage", url=url)] if url else []
 
+    if media.type_name == "TelegramMediaPoll":
+        metadata = _extract_poll_metadata(fields)
+        if metadata is None:
+            return [Attachment(kind=media.type_name)]
+        return [
+            Attachment(
+                kind="poll", filename=metadata.get("question"), metadata=metadata
+            )
+        ]
+
     return [Attachment(kind=media.type_name)]
+
+
+def _extract_poll_metadata(fields: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Build a structured representation of a TelegramMediaPoll payload."""
+    question = fields.get("text") or ""
+    kind_payload = fields.get("kind")
+    if not isinstance(kind_payload, PostboxObject):
+        kind_payload = None
+    kind_fields = kind_payload.fields if kind_payload is not None else {}
+    variant = kind_fields.get("variant")
+    multiple_answers = bool(kind_fields.get("multiple_answers"))
+    if variant == 1:
+        kind = "quiz"
+    else:
+        kind = "poll"
+
+    publicity_value = fields.get("publicity", 0)
+    publicity = "public" if publicity_value == 1 else "anonymous"
+
+    is_closed = bool(fields.get("is_closed"))
+
+    results_payload = fields.get("results")
+    results_fields = (
+        results_payload.fields if isinstance(results_payload, PostboxObject) else {}
+    )
+    total_voters = results_fields.get("total_voters")
+    recent_voters_payload = results_fields.get("recent_voters") or []
+    try:
+        recent_voters = [int(peer_id) for peer_id in recent_voters_payload]
+    except (TypeError, ValueError):
+        recent_voters = []
+
+    solution_payload = results_fields.get("solution_text")
+    solution = str(solution_payload) if isinstance(solution_payload, str) else None
+
+    voters_payload = results_fields.get("voters") or []
+    voters_by_identifier: dict[bytes, dict[str, Any]] = {}
+    for voter in voters_payload:
+        if not isinstance(voter, PostboxObject):
+            continue
+        v_fields = voter.fields
+        identifier = v_fields.get("opaque_identifier")
+        if not isinstance(identifier, (bytes, bytearray)) or len(identifier) == 0:
+            continue
+        raw_recent = v_fields.get("recent_voters") or []
+        try:
+            option_recent = [int(peer_id) for peer_id in raw_recent]
+        except (TypeError, ValueError):
+            option_recent = []
+        voters_by_identifier[bytes(identifier)] = {
+            "selected": bool(v_fields.get("selected")),
+            "count": v_fields.get("count"),
+            "is_correct": bool(v_fields.get("is_correct")),
+            "recent_voters": option_recent,
+        }
+
+    options_payload = fields.get("options") or []
+    options: list[dict[str, Any]] = []
+    correct_option_indices: list[int] = []
+    correct_answers_payload = fields.get("correct_answers")
+    correct_identifiers: set[bytes] = set()
+    if isinstance(correct_answers_payload, list):
+        for item in correct_answers_payload:
+            if isinstance(item, (bytes, bytearray)) and len(item) > 0:
+                correct_identifiers.add(bytes(item))
+
+    for index, option in enumerate(options_payload):
+        if not isinstance(option, PostboxObject):
+            continue
+        o_fields = option.fields
+        identifier = o_fields.get("opaque_identifier")
+        if isinstance(identifier, (bytes, bytearray)) and len(identifier) > 0:
+            identifier_bytes = bytes(identifier)
+        else:
+            identifier_bytes = None
+        voter_info = (
+            voters_by_identifier.get(identifier_bytes) if identifier_bytes else None
+        )
+        if voter_info is None:
+            voter_info = {
+                "selected": False,
+                "count": None,
+                "is_correct": identifier_bytes in correct_identifiers
+                if identifier_bytes is not None
+                else False,
+                "recent_voters": [],
+            }
+        elif identifier_bytes in correct_identifiers:
+            voter_info = {**voter_info, "is_correct": True}
+        if voter_info.get("is_correct"):
+            correct_option_indices.append(index)
+        options.append(
+            {
+                "text": o_fields.get("text", ""),
+                "vote_count": voter_info.get("count"),
+                "selected": voter_info.get("selected", False),
+                "is_correct": voter_info.get("is_correct", False),
+                "recent_voters": voter_info.get("recent_voters", []),
+            }
+        )
+
+    return {
+        "question": question,
+        "kind": kind,
+        "multiple_answers": multiple_answers,
+        "publicity": publicity,
+        "is_closed": is_closed,
+        "total_voters": total_voters,
+        "recent_voters": recent_voters,
+        "options": options,
+        "correct_option_indices": correct_option_indices,
+        "solution": solution,
+    }
 
 
 class PostboxMediaResolver:
@@ -922,7 +1061,7 @@ def iter_postbox_messages(
                 source_message_namespace=raw_forward_info.get("src_msg_ns"),
                 source_message_id=raw_forward_info.get("src_msg_id"),
                 date=(
-                    datetime.fromtimestamp(forward_timestamp)
+                    datetime.fromtimestamp(forward_timestamp, tz=timezone.utc)
                     if forward_timestamp
                     else None
                 ),

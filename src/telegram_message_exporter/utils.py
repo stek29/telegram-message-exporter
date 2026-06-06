@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 URL_RE = re.compile(r"(https?://[^\s<]+)")
 
@@ -23,7 +24,7 @@ def parse_timestamp(value: object) -> Optional[datetime]:
     if ts > 10_000_000_000:
         ts = ts // 1000
     try:
-        return datetime.fromtimestamp(ts)
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -59,6 +60,8 @@ def parse_date_input(value: Optional[str], end: bool = False) -> Optional[int]:
         dt = datetime.combine(dt.date(), time.max)
     if not end and not has_time:
         dt = datetime.combine(dt.date(), time.min)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
 
 
@@ -97,3 +100,33 @@ def linkify_html(text: str) -> str:
         last = end
     parts.append(html.escape(text[last:]))
     return "".join(parts).replace("\n", "<br>")
+
+
+def resolve_timezone(name: Optional[str]):
+    """Resolve a timezone name to a ``tzinfo`` instance.
+
+    ``None`` or empty string returns the system's local timezone. A special
+    name ``"utc"`` returns :data:`datetime.timezone.utc`. Otherwise the name is
+    looked up via :class:`zoneinfo.ZoneInfo` (IANA names like
+    ``"Europe/Berlin"``).
+    """
+    if not name:
+        return datetime.now().astimezone().tzinfo
+    if name.lower() == "utc":
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        raise SystemExit(
+            f"Unknown timezone: {name!r}. Use an IANA name like 'Europe/Berlin' "
+            f"or 'UTC'."
+        ) from exc
+
+
+def to_local(dt: Optional[datetime], tz) -> Optional[datetime]:
+    """Convert a UTC datetime to ``tz`` (leaving naive datetimes untouched)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(tz)
