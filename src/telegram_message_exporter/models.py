@@ -22,6 +22,8 @@ class Attachment:
     exported_path: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    size: Optional[int] = None
+    sticker_emoji: Optional[str] = None
     url: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
 

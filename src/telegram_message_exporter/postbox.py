@@ -530,15 +530,32 @@ TELEGRAM_MEDIA_VIDEO_FLAG_INSTANT_ROUND_VIDEO = 1
 
 def _file_attribute_data(
     attributes: Any,
-) -> tuple[Optional[str], bool, bool, bool, Optional[int], Optional[int]]:
+) -> tuple[
+    Optional[str],
+    bool,
+    bool,
+    bool,
+    Optional[int],
+    Optional[int],
+    Optional[str],
+]:
     filename = None
     is_voice = False
     is_sticker = False
     is_round_video = False
     width = None
     height = None
+    sticker_emoji = None
     if not isinstance(attributes, list):
-        return filename, is_voice, is_sticker, is_round_video, width, height
+        return (
+            filename,
+            is_voice,
+            is_sticker,
+            is_round_video,
+            width,
+            height,
+            sticker_emoji,
+        )
     for attribute in attributes:
         if not isinstance(attribute, PostboxObject):
             continue
@@ -548,6 +565,9 @@ def _file_attribute_data(
             filename = fields["fn"]
         elif attribute_type in (1, 10):
             is_sticker = True
+            alt_text = fields.get("dt")
+            if isinstance(alt_text, str) and alt_text:
+                sticker_emoji = alt_text
         elif attribute_type == 4:
             width = fields.get("w")
             height = fields.get("h")
@@ -559,7 +579,15 @@ def _file_attribute_data(
                 is_round_video = True
         elif attribute_type == 5:
             is_voice = bool(fields.get("iv"))
-    return filename, is_voice, is_sticker, is_round_video, width, height
+    return (
+        filename,
+        is_voice,
+        is_sticker,
+        is_round_video,
+        width,
+        height,
+        sticker_emoji,
+    )
 
 
 def _object_resources(value: Any) -> list[Any]:
@@ -628,9 +656,15 @@ def media_attachments(media: Any) -> list[Attachment]:
     if media.type_name == "TelegramMediaFile":
         resource = fields.get("resource")
         resource_fields = resource.fields if isinstance(resource, PostboxObject) else {}
-        attr_filename, is_voice, is_sticker, is_round_video, width, height = (
-            _file_attribute_data(fields.get("attributes"))
-        )
+        (
+            attr_filename,
+            is_voice,
+            is_sticker,
+            is_round_video,
+            width,
+            height,
+            sticker_emoji,
+        ) = _file_attribute_data(fields.get("attributes"))
         filename = resource_fields.get("file_name") or attr_filename
         mime_type = fields.get("mime_type")
         if is_sticker:
@@ -652,6 +686,11 @@ def media_attachments(media: Any) -> list[Attachment]:
         else:
             kind = "file"
         cache_key, alternate_cache_keys, source_path = _file_resource_keys(fields)
+        raw_size = fields.get("size")
+        if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+            size = None
+        else:
+            size = raw_size
         return [
             Attachment(
                 kind=kind,
@@ -662,6 +701,8 @@ def media_attachments(media: Any) -> list[Attachment]:
                 source_path=source_path,
                 width=width,
                 height=height,
+                size=size,
+                sticker_emoji=sticker_emoji,
             )
         ]
 
@@ -1160,10 +1201,15 @@ def _peer_info_from_payload(peer_id: int, data: Any) -> Optional[PeerInfo]:
     raw_flags = data.get("fl") if isinstance(data.get("fl"), int) else 0
     fake_bit = 8 if kind == PeerKind.USER else 64
     raw_name_color = data.get("nclr")
-    name_color = raw_name_color if (
-        isinstance(raw_name_color, int) and not isinstance(raw_name_color, bool)
-        and raw_name_color >= 0
-    ) else None
+    name_color = (
+        raw_name_color
+        if (
+            isinstance(raw_name_color, int)
+            and not isinstance(raw_name_color, bool)
+            and raw_name_color >= 0
+        )
+        else None
+    )
     return PeerInfo(
         name=name,
         kind=kind,

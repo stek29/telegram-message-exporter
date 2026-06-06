@@ -56,7 +56,11 @@ def peer_display_color(peer: PeerInfo, peer_id: int) -> tuple[str, str]:
     same table.
     """
     name_color = peer.name_color
-    if isinstance(name_color, int) and not isinstance(name_color, bool) and name_color in PEER_NAME_COLOR_HEX:
+    if (
+        isinstance(name_color, int)
+        and not isinstance(name_color, bool)
+        and name_color in PEER_NAME_COLOR_HEX
+    ):
         solid = PEER_NAME_COLOR_HEX[name_color]
     else:
         solid = PEER_NAME_COLOR_HEX[abs(peer_id) % 7]
@@ -91,12 +95,8 @@ def render_peer_color_css(color_map: dict[int, tuple[str, str]]) -> str:
     rules: list[str] = []
     for peer_id, (solid, soft) in sorted(color_map.items()):
         selector = f'.msg[data-peer-id="{_escape_css_selector(str(peer_id))}"]'
-        rules.append(
-            f"{selector} {{ --peer-color: {solid}; --peer-soft: {soft}; }}"
-        )
-        rules.append(
-            f"{selector} .bubble {{ border-left-color: var(--peer-color); }}"
-        )
+        rules.append(f"{selector} {{ --peer-color: {solid}; --peer-soft: {soft}; }}")
+        rules.append(f"{selector} .bubble {{ border-left-color: var(--peer-color); }}")
         rules.append(
             f"{selector} .meta .speaker, "
             f"{selector} .meta .speaker a "
@@ -351,6 +351,7 @@ header.header-panel {
   pointer-events: none;
 }
 .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.file-meta { font-size: 0.85em; opacity: 0.7; margin-top: 4px; }
 .forwarded {
   padding-left: 8px;
   border-left: 2px solid var(--accent);
@@ -676,6 +677,17 @@ def _attachment_description(attachment: Attachment) -> str:
         details.append(attachment.filename)
     if attachment.mime_type:
         details.append(attachment.mime_type)
+    if (
+        isinstance(attachment.width, int)
+        and isinstance(attachment.height, int)
+        and attachment.width > 0
+        and attachment.height > 0
+    ):
+        details.append(f"{attachment.width}×{attachment.height}")
+    if isinstance(attachment.size, int) and attachment.size >= 0:
+        details.append(_human_size(attachment.size))
+    if attachment.kind == "sticker" and attachment.sticker_emoji:
+        details.append(attachment.sticker_emoji)
     cache_key = attachment.selected_cache_key or attachment.cache_key
     if cache_key:
         details.append(f"cache: {cache_key}")
@@ -689,6 +701,19 @@ def _is_preview_attachment(attachment: Attachment) -> bool:
     if not attachment.selected_cache_key or not attachment.alternate_cache_keys:
         return False
     return attachment.selected_cache_key in attachment.alternate_cache_keys
+
+
+def _human_size(n: int) -> str:
+    """Format ``n`` bytes as a human-readable string (B/KB/MB/GB/TB, 1024-based)."""
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(n)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{int(value)} TB"
 
 
 def _render_markdown_attachment(
@@ -1278,18 +1303,26 @@ def _render_html_attachment(
     if attachment.exported_path:
         path = html.escape(attachment.exported_path, quote=True)
         mime_type = html.escape(attachment.mime_type or "", quote=True)
+        dim_attr = ""
+        if (
+            isinstance(attachment.width, int)
+            and isinstance(attachment.height, int)
+            and attachment.width > 0
+            and attachment.height > 0
+        ):
+            dim_attr = f' width="{attachment.width}" height="{attachment.height}"'
         if attachment.kind == "image" or (
             attachment.kind == "sticker"
             and attachment.mime_type in {"image/png", "image/webp"}
         ):
             handle.write(
                 f'<div><img src="{path}" alt="{label}" loading="lazy" '
-                'decoding="async"></div>'
+                f'decoding="async"{dim_attr}></div>'
             )
         elif attachment.kind == "video_message":
             handle.write(
                 f'<div class="video-message" data-video-message>'
-                f'<video preload="metadata" playsinline loop>'
+                f'<video preload="metadata" playsinline loop{dim_attr}>'
                 f'<source src="{path}" type="{mime_type}"></video>'
                 f'<button class="play-overlay" type="button" '
                 f'aria-label="Play video message">'
@@ -1302,7 +1335,8 @@ def _render_html_attachment(
             and attachment.mime_type in {"video/mp4", "video/webm"}
         ):
             handle.write(
-                f'<div><video controls preload="none"><source src="{path}" '
+                f'<div><video controls preload="none"{dim_attr}>'
+                f'<source src="{path}" '
                 f'type="{mime_type}"></video></div>'
             )
         elif attachment.kind in {"voice", "audio"}:
@@ -1312,7 +1346,7 @@ def _render_html_attachment(
             )
         else:
             handle.write(f'<div><a download href="{path}">{label}</a></div>')
-        handle.write(f'<div class="meta">{html.escape(description)}</div>')
+        handle.write(f'<div class="meta file-meta">{html.escape(description)}</div>')
         return
     handle.write(f'<div class="meta">{html.escape(description)}</div>')
 
