@@ -32,6 +32,8 @@ class Attachment:
         default_factory=dict
     )
     is_preview_fallback: bool = False
+    vcard_data: Optional[str] = None
+    vcard_path: Optional[str] = None
 
     def is_image(self) -> bool:
         """True for image-kind attachments and any preview fallback to an image.

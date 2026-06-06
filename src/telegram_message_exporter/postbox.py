@@ -1326,7 +1326,484 @@ def media_attachments(media: Any) -> list[Attachment]:
             )
         ]
 
+    if media.type_name == "TelegramMediaContact":
+        return [_contact_attachment(fields)]
+    if media.type_name == "TelegramMediaDice":
+        return [_dice_attachment(fields)]
+    if media.type_name == "TelegramMediaExpiredContent":
+        return [_expired_content_attachment(fields)]
+    if media.type_name == "TelegramMediaGame":
+        return [_game_attachment(fields)]
+    if media.type_name == "TelegramMediaGiveaway":
+        return [_giveaway_attachment(fields)]
+    if media.type_name == "TelegramMediaGiveawayResults":
+        return [_giveaway_results_attachment(fields)]
+    if media.type_name == "TelegramMediaInvoice":
+        return [_invoice_attachment(media, fields)]
+    if media.type_name == "TelegramMediaLiveStream":
+        return [_live_stream_attachment(fields)]
+    if media.type_name == "TelegramMediaMap":
+        return [_map_attachment(fields)]
+    if media.type_name == "TelegramMediaPaidContent":
+        return [_paid_content_attachment(fields)]
+    if media.type_name == "TelegramMediaStory":
+        return [_story_attachment(fields)]
+    if media.type_name == "TelegramMediaTodo":
+        return [_todo_attachment(fields)]
+    if media.type_name == "TelegramMediaUnsupported":
+        return [_unsupported_attachment()]
+
     return [Attachment(kind=media.type_name)]
+
+
+def _contact_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaContact`` payload."""
+    first_name = _maybe_str(fields.get("first_name")) or ""
+    last_name = _maybe_str(fields.get("last_name")) or ""
+    phone_number = _maybe_str(fields.get("phone_number")) or ""
+    raw_peer_id = fields.get("peer_id")
+    peer_id: Optional[int] = None
+    if (
+        isinstance(raw_peer_id, int)
+        and not isinstance(raw_peer_id, bool)
+        and raw_peer_id != 0
+    ):
+        peer_id = int(raw_peer_id)
+    vcard_data = _maybe_str(fields.get("vcard"))
+    display_name = " ".join(part for part in (first_name, last_name) if part).strip()
+    metadata: dict[str, Any] = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "phone_number": phone_number,
+        "has_vcard": vcard_data is not None,
+        "peer_id": peer_id,
+    }
+    return Attachment(
+        kind="contact",
+        filename=display_name or phone_number or None,
+        metadata=metadata,
+        vcard_data=vcard_data,
+    )
+
+
+def _dice_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaDice`` payload."""
+    emoji = _maybe_str(fields.get("emoji")) or "🎲"
+    raw_value = fields.get("value")
+    value: Optional[int] = None
+    if isinstance(raw_value, int) and not isinstance(raw_value, bool):
+        value = int(raw_value)
+    raw_ton = fields.get("ton_amount")
+    ton_amount: Optional[int] = None
+    if isinstance(raw_ton, int) and not isinstance(raw_ton, bool) and raw_ton != 0:
+        ton_amount = int(raw_ton)
+    metadata: dict[str, Any] = {
+        "emoji": emoji,
+        "value": value,
+        "ton_amount": ton_amount,
+    }
+    return Attachment(kind="dice", filename=emoji, metadata=metadata)
+
+
+def _expired_content_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaExpiredContent`` payload.
+
+    The ``data`` field is a Postbox Int32 enum:
+    ``0``=image, ``1``=file, ``2``=voice, ``3``=video.
+    """
+    raw = fields.get("data")
+    data_int: Optional[int] = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        data_int = int(raw)
+    label_map = {0: "image", 1: "file", 2: "voice", 3: "video"}
+    label = label_map.get(data_int, "media") if data_int is not None else "media"
+    metadata: dict[str, Any] = {"data": data_int, "label": label}
+    return Attachment(
+        kind="expired_content",
+        filename=f"expired {label}",
+        metadata=metadata,
+    )
+
+
+def _game_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaGame`` payload.
+
+    The embedded ``image`` and ``file`` are read into nested
+    :class:`Attachment` objects via :func:`media_attachments` so their
+    cache keys can be picked up by :func:`copy_message_media` — but
+    only one ``Attachment`` is returned here (the game itself), with
+    the nested media referenced through ``metadata`` for renderers
+    that need to inline a thumbnail.
+    """
+    title = _maybe_str(fields.get("title")) or ""
+    name = _maybe_str(fields.get("name")) or ""
+    description = _maybe_str(fields.get("description")) or ""
+    image_obj = fields.get("image")
+    file_obj = fields.get("file")
+    image_attachment: Optional[Attachment] = None
+    if (
+        isinstance(image_obj, PostboxObject)
+        and image_obj.type_name == "TelegramMediaImage"
+    ):
+        nested = media_attachments(image_obj)
+        if nested:
+            image_attachment = nested[0]
+    file_attachment: Optional[Attachment] = None
+    if (
+        isinstance(file_obj, PostboxObject)
+        and file_obj.type_name == "TelegramMediaFile"
+    ):
+        nested = media_attachments(file_obj)
+        if nested:
+            file_attachment = nested[0]
+    metadata: dict[str, Any] = {
+        "title": title,
+        "description": description,
+        "name": name,
+        "image": (
+            {
+                "cache_key": image_attachment.cache_key,
+                "width": image_attachment.width,
+                "height": image_attachment.height,
+            }
+            if image_attachment is not None
+            else None
+        ),
+        "file": (
+            {
+                "cache_key": file_attachment.cache_key,
+                "filename": file_attachment.filename,
+            }
+            if file_attachment is not None
+            else None
+        ),
+    }
+    return Attachment(
+        kind="game",
+        filename=title or name or None,
+        metadata=metadata,
+        preview_image=image_attachment,
+    )
+
+
+def _giveaway_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaGiveaway`` payload."""
+    raw_channel_ids = fields.get("channel_peer_ids")
+    channel_peer_ids: list[int] = []
+    if isinstance(raw_channel_ids, list):
+        for value in raw_channel_ids:
+            if isinstance(value, int) and not isinstance(value, bool):
+                channel_peer_ids.append(int(value))
+    raw_countries = fields.get("countries")
+    countries: list[str] = []
+    if isinstance(raw_countries, list):
+        for value in raw_countries:
+            if isinstance(value, str):
+                countries.append(value)
+    raw_quantity = fields.get("quantity")
+    quantity: Optional[int] = None
+    if isinstance(raw_quantity, int) and not isinstance(raw_quantity, bool):
+        quantity = int(raw_quantity)
+    raw_months = fields.get("premium_months")
+    premium_months: Optional[int] = None
+    if isinstance(raw_months, int) and not isinstance(raw_months, bool):
+        premium_months = int(raw_months)
+    raw_stars = fields.get("stars_amount")
+    stars_amount: Optional[int] = None
+    if isinstance(raw_stars, int) and not isinstance(raw_stars, bool):
+        stars_amount = int(raw_stars)
+    raw_until = fields.get("until_date")
+    until_date: Optional[int] = None
+    if isinstance(raw_until, int) and not isinstance(raw_until, bool):
+        until_date = int(raw_until)
+    prize_description = _maybe_str(fields.get("prize_description"))
+    metadata: dict[str, Any] = {
+        "channel_peer_ids": channel_peer_ids,
+        "countries": countries,
+        "quantity": quantity,
+        "premium_months": premium_months,
+        "stars_amount": stars_amount,
+        "until_date": until_date,
+        "prize_description": prize_description,
+    }
+    return Attachment(kind="giveaway", filename="Giveaway", metadata=metadata)
+
+
+def _giveaway_results_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaGiveawayResults`` payload."""
+    raw_winners = fields.get("winners_count")
+    winners_count: Optional[int] = None
+    if isinstance(raw_winners, int) and not isinstance(raw_winners, bool):
+        winners_count = int(raw_winners)
+    raw_unclaimed = fields.get("unclaimed_count")
+    unclaimed_count: Optional[int] = None
+    if isinstance(raw_unclaimed, int) and not isinstance(raw_unclaimed, bool):
+        unclaimed_count = int(raw_unclaimed)
+    raw_additional = fields.get("additional_channels_count")
+    additional_channels_count: Optional[int] = None
+    if isinstance(raw_additional, int) and not isinstance(raw_additional, bool):
+        additional_channels_count = int(raw_additional)
+    raw_months = fields.get("premium_months")
+    premium_months: Optional[int] = None
+    if isinstance(raw_months, int) and not isinstance(raw_months, bool):
+        premium_months = int(raw_months)
+    raw_stars = fields.get("stars_amount")
+    stars_amount: Optional[int] = None
+    if isinstance(raw_stars, int) and not isinstance(raw_stars, bool):
+        stars_amount = int(raw_stars)
+    metadata: dict[str, Any] = {
+        "winners_count": winners_count,
+        "unclaimed_count": unclaimed_count,
+        "additional_channels_count": additional_channels_count,
+        "premium_months": premium_months,
+        "stars_amount": stars_amount,
+    }
+    return Attachment(
+        kind="giveaway_result", filename="Giveaway results", metadata=metadata
+    )
+
+
+def _invoice_attachment(media: PostboxObject, fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaInvoice`` payload.
+
+    Extended media (``extendedMedia``) is intentionally **not** walked
+    into here — its nested ``TelegramExtendedMedia`` decoder is not
+    registered, and decoding it would surface a raw ``dict``. The base
+    text/metadata rendering is shipped first; full extended-media
+    rendering is a follow-up.
+    """
+    title = _maybe_str(fields.get("title")) or ""
+    description = _maybe_str(fields.get("description")) or ""
+    currency = _maybe_str(fields.get("currency")) or ""
+    raw_total = fields.get("total_amount")
+    total_amount: Optional[int] = None
+    if isinstance(raw_total, int) and not isinstance(raw_total, bool):
+        total_amount = int(raw_total)
+    photo = fields.get("photo")
+    has_photo = isinstance(photo, PostboxObject)
+    photo_attachment: Optional[Attachment] = None
+    if has_photo and isinstance(photo, PostboxObject):
+        nested = media_attachments(photo)
+        if nested:
+            photo_attachment = nested[0]
+    raw_receipt_id = fields.get("receipt_message_id_id")
+    receipt_message_id: Optional[int] = None
+    if isinstance(raw_receipt_id, int) and not isinstance(raw_receipt_id, bool):
+        receipt_message_id = int(raw_receipt_id)
+    metadata: dict[str, Any] = {
+        "title": title,
+        "description": description,
+        "currency": currency,
+        "total_amount": total_amount,
+        "has_photo": has_photo,
+        "receipt_message_id": receipt_message_id,
+    }
+    return Attachment(
+        kind="invoice",
+        filename=title or None,
+        metadata=metadata,
+        preview_image=photo_attachment,
+    )
+
+
+def _live_stream_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaLiveStream`` payload.
+
+    The ``call`` field is a ``GroupCallReference`` (registered as a
+    named decoder) carrying opaque id+accessHash that don't render
+    meaningfully without the Telegram client. The ``kind`` is the
+    ``Int32`` enum ``0``=rtmp, ``1``=rtc.
+    """
+    call_obj = fields.get("call")
+    call_id: Optional[int] = None
+    if isinstance(call_obj, PostboxObject):
+        cid = call_obj.fields.get("id")
+        if isinstance(cid, int) and not isinstance(cid, bool):
+            call_id = int(cid)
+    raw_kind = fields.get("kind")
+    kind_int: Optional[int] = None
+    if isinstance(raw_kind, int) and not isinstance(raw_kind, bool):
+        kind_int = int(raw_kind)
+    metadata: dict[str, Any] = {
+        "call_id": call_id,
+        "kind": kind_int,
+        "kind_label": "video" if kind_int == 1 else "rtmp",
+    }
+    return Attachment(kind="live_stream", filename="Live stream", metadata=metadata)
+
+
+def _map_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaMap`` payload."""
+    raw_lat = fields.get("latitude")
+    latitude: Optional[float] = None
+    if isinstance(raw_lat, (int, float)) and not isinstance(raw_lat, bool):
+        latitude = float(raw_lat)
+    raw_lng = fields.get("longitude")
+    longitude: Optional[float] = None
+    if isinstance(raw_lng, (int, float)) and not isinstance(raw_lng, bool):
+        longitude = float(raw_lng)
+    venue_obj = fields.get("venue")
+    venue: Optional[dict[str, Any]] = None
+    if isinstance(venue_obj, PostboxObject) and venue_obj.type_name == "MapVenue":
+        v = venue_obj.fields
+        venue = {
+            "title": _maybe_str(v.get("title")),
+            "address": _maybe_str(v.get("address")),
+            "provider": _maybe_str(v.get("provider")),
+            "id": _maybe_str(v.get("id")),
+            "type": _maybe_str(v.get("type")),
+        }
+    address_obj = fields.get("address")
+    address: Optional[dict[str, Any]] = None
+    if (
+        isinstance(address_obj, PostboxObject)
+        and address_obj.type_name == "MapGeoAddress"
+    ):
+        a = address_obj.fields
+        address = {
+            "country": _maybe_str(a.get("country")),
+            "state": _maybe_str(a.get("state")),
+            "city": _maybe_str(a.get("city")),
+            "street": _maybe_str(a.get("street")),
+        }
+    raw_live = fields.get("live_broadcasting_timeout")
+    live_timeout: Optional[int] = None
+    if isinstance(raw_live, int) and not isinstance(raw_live, bool):
+        live_timeout = int(raw_live)
+    metadata: dict[str, Any] = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "venue": venue,
+        "address": address,
+        "live_timeout": live_timeout,
+    }
+    return Attachment(
+        kind="map", filename=venue["title"] if venue else "Map pin", metadata=metadata
+    )
+
+
+def _paid_content_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaPaidContent`` payload."""
+    raw_amount = fields.get("amount")
+    stars_amount: Optional[int] = None
+    if isinstance(raw_amount, int) and not isinstance(raw_amount, bool):
+        stars_amount = int(raw_amount)
+    raw_media = fields.get("extended_media")
+    extended_media_count = 0
+    if isinstance(raw_media, list):
+        extended_media_count = len(raw_media)
+    metadata: dict[str, Any] = {
+        "stars_amount": stars_amount,
+        "extended_media_count": extended_media_count,
+    }
+    return Attachment(kind="paid_content", filename="Paid media", metadata=metadata)
+
+
+def _story_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaStory`` payload."""
+    raw_peer_id = fields.get("peer_id")
+    peer_id: Optional[int] = None
+    if (
+        isinstance(raw_peer_id, int)
+        and not isinstance(raw_peer_id, bool)
+        and raw_peer_id != 0
+    ):
+        peer_id = int(raw_peer_id)
+    raw_story_id = fields.get("story_id")
+    story_id: Optional[int] = None
+    if isinstance(raw_story_id, int) and not isinstance(raw_story_id, bool):
+        story_id = int(raw_story_id)
+    raw_mention = fields.get("is_mention")
+    is_mention = bool(raw_mention)
+    metadata: dict[str, Any] = {
+        "peer_id": peer_id,
+        "story_id": story_id,
+        "is_mention": is_mention,
+    }
+    return Attachment(
+        kind="story",
+        filename=f"Story {story_id}" if story_id is not None else "Story",
+        metadata=metadata,
+    )
+
+
+def _todo_attachment(fields: dict[str, Any]) -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaTodo`` payload.
+
+    ``Item`` and ``Completion`` are not registered as named decoders,
+    so they come back as raw ``dict``s. The raw Postbox two-letter
+    keys (``t``, ``i``, ``d``, ``p``) are used directly here — these
+    items are throwaway structures (not reused across calls), so
+    the raw-key access keeps the helper self-contained.
+    """
+    raw_flags = fields.get("flags")
+    flags_int = (
+        int(raw_flags)
+        if isinstance(raw_flags, int) and not isinstance(raw_flags, bool)
+        else 0
+    )
+    text = _maybe_str(fields.get("text")) or ""
+    raw_items = fields.get("items")
+    items: list[dict[str, Any]] = []
+    if isinstance(raw_items, list):
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("i")
+            item_id: Optional[int] = None
+            if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+                item_id = int(raw_id)
+            items.append(
+                {
+                    "id": item_id,
+                    "text": _maybe_str(entry.get("t")) or "",
+                }
+            )
+    raw_completions = fields.get("completions")
+    completions: list[dict[str, Any]] = []
+    if isinstance(raw_completions, list):
+        for entry in raw_completions:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("i")
+            comp_id: Optional[int] = None
+            if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+                comp_id = int(raw_id)
+            raw_date = entry.get("d")
+            date: Optional[int] = None
+            if isinstance(raw_date, int) and not isinstance(raw_date, bool):
+                date = int(raw_date)
+            raw_by = entry.get("p")
+            completed_by: Optional[int] = None
+            if isinstance(raw_by, int) and not isinstance(raw_by, bool) and raw_by != 0:
+                completed_by = int(raw_by)
+            completions.append(
+                {
+                    "id": comp_id,
+                    "date": date,
+                    "completed_by": completed_by,
+                }
+            )
+    metadata: dict[str, Any] = {
+        "text": text,
+        "flags": {
+            "others_can_append": bool(flags_int & 1),
+            "others_can_complete": bool(flags_int & 2),
+            "raw": flags_int,
+        },
+        "items": items,
+        "completions": completions,
+    }
+    return Attachment(
+        kind="todo",
+        filename=text or "Todo",
+        metadata=metadata,
+    )
+
+
+def _unsupported_attachment() -> Attachment:
+    """Build an :class:`Attachment` for a ``TelegramMediaUnsupported`` payload."""
+    return Attachment(kind="unsupported", filename="Unsupported", metadata={})
 
 
 def _extract_poll_metadata(fields: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -1833,6 +2310,66 @@ def load_peer_map(rows: Iterable[tuple[bytes, bytes]]) -> dict[int, PeerInfo]:
         if info is not None:
             peer_map[peer_id] = info
     return peer_map
+
+
+def attachment_referenced_peer_ids(attachment: Attachment) -> list[int]:
+    """Return peer ids referenced inside an :class:`Attachment`.
+
+    A peer's row in the Postbox ``t2`` (PEER) table only gets loaded into
+    the export's ``peer_map`` if the peer's id is collected up-front by
+    the CLI. Peers that *only* appear inside an attachment — e.g. the
+    author of a Story, the channel set of a Giveaway, the participants
+    of a service action — are not picked up by the message-level scan
+    in ``cli.py``. This helper closes that gap by walking each
+    attachment's metadata and yielding every peer id it can find.
+
+    Coverage:
+
+    - ``contact`` / ``story`` — ``metadata.peer_id`` (single int)
+    - ``giveaway`` / ``giveaway_results`` — ``metadata.channel_peer_ids``
+      and ``metadata.winners_peer_ids`` (lists)
+    - ``action`` — walks ``metadata.payload`` for ``peerIds`` (either a
+      ``bytes`` blob, as used by ``addedMembers`` / ``removedMembers``,
+      or a plain list, as used by ``inviteToGroupPhoneCall`` /
+      ``requestedPeer``), plus the singular ``peerId`` / ``inviter`` /
+      ``fromId`` / ``toId`` / ``channelId`` / ``groupId`` fields
+    - everything else — empty list
+    """
+    metadata = attachment.metadata
+    if not isinstance(metadata, dict):
+        return []
+    kind = attachment.kind
+    ids: list[int] = []
+
+    def _add_int(value: Any) -> None:
+        if isinstance(value, int) and not isinstance(value, bool):
+            ids.append(int(value))
+
+    if kind in ("contact", "story"):
+        _add_int(metadata.get("peer_id"))
+    elif kind in ("giveaway", "giveaway_results"):
+        for key in ("channel_peer_ids", "winners_peer_ids"):
+            for value in metadata.get(key) or ():
+                _add_int(value)
+    elif kind == "action":
+        payload = metadata.get("payload")
+        if isinstance(payload, dict):
+            peer_ids = payload.get("peerIds")
+            if isinstance(peer_ids, (bytes, bytearray)):
+                ids.extend(_decode_peer_ids_from_buffer(peer_ids))
+            elif isinstance(peer_ids, list):
+                for value in peer_ids:
+                    _add_int(value)
+            for key in (
+                "peerId",
+                "inviter",
+                "fromId",
+                "toId",
+                "channelId",
+                "groupId",
+            ):
+                _add_int(payload.get(key))
+    return ids
 
 
 def peer_url(

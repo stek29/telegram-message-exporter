@@ -34,6 +34,7 @@ from .exporters import (
 from .models import PeerInfo
 from .postbox import (
     PostboxMediaResolver,
+    attachment_referenced_peer_ids,
     iter_postbox_messages,
     list_peers_postbox,
     load_peer_map,
@@ -156,24 +157,24 @@ def cmd_export(args: argparse.Namespace) -> None:
         if options.peer_id is None:
             peer_rows = conn.execute(f"SELECT key, value FROM {peer_table}")
         else:
-            referenced_peer_ids = {
-                peer_id
-                for message in messages
-                for peer_id in (
-                    message.peer_id,
-                    message.author_id,
-                    message.forward_info.author_id
-                    if message.forward_info is not None
-                    else None,
-                    message.forward_info.source_id
-                    if message.forward_info is not None
-                    else None,
-                    message.forward_info.source_message_peer_id
-                    if message.forward_info is not None
-                    else None,
-                )
-                if peer_id is not None
-            }
+            referenced_peer_ids: set[int] = set()
+            for message in messages:
+                if message.peer_id is not None:
+                    referenced_peer_ids.add(message.peer_id)
+                if message.author_id is not None:
+                    referenced_peer_ids.add(message.author_id)
+                if message.forward_info is not None:
+                    for key in (
+                        message.forward_info.author_id,
+                        message.forward_info.source_id,
+                        message.forward_info.source_message_peer_id,
+                    ):
+                        if key is not None:
+                            referenced_peer_ids.add(key)
+                for attachment in message.attachments:
+                    referenced_peer_ids.update(
+                        attachment_referenced_peer_ids(attachment)
+                    )
             referenced_peer_ids.add(options.peer_id)
             peer_rows = iter_postbox_peer_rows(
                 conn,

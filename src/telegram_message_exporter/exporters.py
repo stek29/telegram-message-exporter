@@ -11,10 +11,11 @@ import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .models import Attachment, ForwardedSegment, Message, PeerInfo
 from .postbox import _decode_peer_ids_from_buffer, peer_url
+from .hashing import persistent_hash32
 from .schema import ConferenceCallFlags, PhoneCallDiscardReason, TelegramMediaActionType
 from .utils import linkify_html, linkify_markdown, to_local
 
@@ -517,6 +518,75 @@ a:hover { text-decoration: underline; }
   word-break: break-word;
 }
 .link-preview img, .link-preview video { max-width: 100%; height: auto; border-radius: 6px; margin-top: 6px; display: block; }
+.contact-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.contact-card .contact-name { font-weight: 600; }
+.contact-card .contact-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.game-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.game-card .game-title { font-weight: 600; font-size: 14px; }
+.game-card .game-desc { font-size: 13px; color: var(--ink); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.game-card img { max-width: 100%; height: auto; border-radius: 6px; margin-top: 6px; display: block; }
+.invoice-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.invoice-card .invoice-title { font-weight: 600; font-size: 14px; }
+.invoice-card .invoice-amount { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 13px; margin-top: 4px; }
+.invoice-card .invoice-desc { font-size: 13px; color: var(--ink); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.invoice-card img { max-width: 100%; height: auto; border-radius: 6px; margin-top: 6px; display: block; }
+.giveaway-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.giveaway-card .giveaway-title { font-weight: 600; }
+.giveaway-card .giveaway-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.map-pin {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.map-pin .map-venue { font-weight: 600; }
+.map-pin .map-address { font-size: 13px; color: var(--ink); margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.map-pin .map-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.todo-card {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.todo-card .todo-header { font-weight: 600; }
+.todo-card .todo-flags { font-size: 11px; color: var(--muted); font-style: italic; margin-top: 2px; }
+.todo-card .todo-progress { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.todo-card ul.todo-items { list-style: none; padding-left: 0; margin: 6px 0 0; }
+.todo-card ul.todo-items li { padding: 3px 0; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.todo-card ul.todo-items li .completion { font-size: 11px; color: var(--muted); }
+.todo-card input[type="checkbox"][disabled] { margin: 0; }
 """
 
 
@@ -577,6 +647,11 @@ def _copy_single_attachment(
     them here would clear the preview fields and leave the card empty,
     so the recursion in :func:`copy_message_media` is left to copy the
     sub-attachments directly.
+
+    Contacts with ``vcard_data`` get a synthetic ``.vcf`` file written
+    into ``target_dir`` and the resulting relative path exposed on
+    ``attachment.vcard_path``. The raw ``vcard_data`` is cleared so it
+    doesn't leak into the CSV/HTML output.
     """
     main_attachment, main_count = _copy_to_target(
         attachment, media_dir, target_dir, copied_keys
@@ -629,7 +704,41 @@ def _copy_single_attachment(
         attachment.preview_image.cache_key if attachment.preview_image else None,
         attachment.preview_video.cache_key if attachment.preview_video else None,
     )
+    if attachment.vcard_data is not None:
+        written, vcard_count = _write_vcard(attachment, target_dir, copied_keys)
+        if vcard_count > 0:
+            return written, vcard_count
     return attachment, 0
+
+
+def _write_vcard(
+    attachment: Attachment,
+    target_dir: Path,
+    copied_keys: set[str],
+) -> tuple[Attachment, int]:
+    """Write a contact's ``vcard_data`` to a ``.vcf`` file in ``target_dir``.
+
+    Returns the updated attachment (with ``vcard_path`` set and
+    ``vcard_data`` cleared) and the number of files written. The
+    filename is derived from a stable hash of the vCard contents so
+    the same contact across multiple messages shares one file.
+    """
+    data = attachment.vcard_data
+    if not isinstance(data, str) or not data:
+        return attachment, 0
+    target_dir.mkdir(parents=True, exist_ok=True)
+    name = f"vcard-{persistent_hash32(data)}.vcf"
+    target = target_dir / name
+    copied = 0
+    if name not in copied_keys:
+        target.write_text(data, encoding="utf-8")
+        copied_keys.add(name)
+        copied = 1
+    rel_path = (Path(target_dir.name) / name).as_posix()
+    return (
+        replace(attachment, vcard_path=rel_path, vcard_data=None),
+        copied,
+    )
 
 
 def _copy_to_target(
@@ -1657,6 +1766,34 @@ def _render_markdown_attachment(
         return _render_markdown_webpage_preview(attachment)
     if attachment.kind == "action":
         return _render_markdown_service_message(attachment, peer_map, author_id)
+    if attachment.kind == "poll" and attachment.metadata:
+        return _render_markdown_poll(attachment.metadata, peer_map)
+    if attachment.kind == "contact":
+        return _render_markdown_contact(attachment, peer_map)
+    if attachment.kind == "dice":
+        return _render_markdown_dice(attachment)
+    if attachment.kind == "expired_content":
+        return _render_markdown_expired(attachment)
+    if attachment.kind == "game":
+        return _render_markdown_game(attachment, peer_map)
+    if attachment.kind == "invoice":
+        return _render_markdown_invoice(attachment)
+    if attachment.kind == "giveaway":
+        return _render_markdown_giveaway(attachment)
+    if attachment.kind == "giveaway_result":
+        return _render_markdown_giveaway_result(attachment)
+    if attachment.kind == "live_stream":
+        return _render_markdown_live_stream(attachment)
+    if attachment.kind == "map":
+        return _render_markdown_map(attachment, peer_map)
+    if attachment.kind == "paid_content":
+        return _render_markdown_paid_content(attachment)
+    if attachment.kind == "story":
+        return _render_markdown_story(attachment, peer_map)
+    if attachment.kind == "todo":
+        return _render_markdown_todo(attachment, peer_map)
+    if attachment.kind == "unsupported":
+        return _render_markdown_unsupported(attachment)
     label = _attachment_label(attachment)
     if attachment.url:
         return f"[{label}]({attachment.url})"
@@ -1668,9 +1805,7 @@ def _render_markdown_attachment(
         else:
             primary = f"[{label}]({attachment.exported_path})"
         return f"{primary}\n`[{_attachment_description(attachment)}]`"
-    if attachment.kind == "poll" and attachment.metadata:
-        return _render_markdown_poll(attachment.metadata, peer_map)
-    return f"`[{_attachment_description(attachment)}]`"
+    return _render_markdown_unknown_kind(attachment)
 
 
 def _render_markdown_preview_fallback(attachment: Attachment, label: str) -> str:
@@ -1728,6 +1863,296 @@ def _render_markdown_webpage_preview(attachment: Attachment) -> str:
         parts.append(f"[▶ {video_label}]({preview_video.exported_path})")
 
     return "\n".join(parts)
+
+
+def _render_markdown_contact(
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+) -> str:
+    """Render a contact as a single-line Markdown summary + optional vCard link."""
+    metadata = attachment.metadata or {}
+    first_name = metadata.get("first_name") or ""
+    last_name = metadata.get("last_name") or ""
+    phone = metadata.get("phone_number") or ""
+    name = " ".join(part for part in (first_name, last_name) if part).strip()
+    head_bits: list[str] = []
+    if name:
+        head_bits.append(f"👤 **{name}**")
+    if phone:
+        head_bits.append(phone)
+    parts: list[str] = []
+    if head_bits:
+        parts.append(" · ".join(head_bits))
+    if attachment.vcard_path:
+        parts.append(f"[vCard]({attachment.vcard_path})")
+    if not parts:
+        return f"`[{_attachment_description(attachment)}]`"
+    return "\n".join(parts)
+
+
+def _render_markdown_dice(attachment: Attachment) -> str:
+    """Render a dice as an italic service-style Markdown line."""
+    metadata = attachment.metadata or {}
+    emoji = metadata.get("emoji") or "🎲"
+    value = metadata.get("value")
+    ton_amount = metadata.get("ton_amount")
+    bits: list[str] = []
+    if value is not None:
+        bits.append(f"*{emoji} {value}*")
+    else:
+        bits.append(f"*{emoji}*")
+    if ton_amount:
+        bits.append(f"{ton_amount} TON")
+    return " · ".join(bits)
+
+
+def _render_markdown_expired(attachment: Attachment) -> str:
+    """Render an expired-content placeholder as italic Markdown."""
+    metadata = attachment.metadata or {}
+    label = metadata.get("label") or "media"
+    return f"*(expired {label})*"
+
+
+def _render_markdown_game(
+    attachment: Attachment, peer_map: Optional[dict[int, PeerInfo]] = None
+) -> str:
+    """Render a game as Markdown title + description + optional thumbnail."""
+    metadata = attachment.metadata or {}
+    title = (metadata.get("title") or "").strip() or "Game"
+    description = (metadata.get("description") or "").strip()
+    parts: list[str] = [f"**Game: {title}**"]
+    if description:
+        parts.append("")
+        parts.append(description)
+    image_path = (
+        attachment.preview_image.exported_path
+        if attachment.preview_image and attachment.preview_image.exported_path
+        else None
+    )
+    if image_path:
+        parts.append("")
+        parts.append(f"![{title}]({image_path})")
+    return "\n".join(parts)
+
+
+def _render_markdown_invoice(attachment: Attachment) -> str:
+    """Render an invoice as Markdown title + amount + description."""
+    metadata = attachment.metadata or {}
+    title = (metadata.get("title") or "").strip() or "Invoice"
+    amount_str = _format_invoice_amount(
+        metadata.get("total_amount"), metadata.get("currency") or ""
+    )
+    description = (metadata.get("description") or "").strip()
+    parts: list[str] = [f"**Invoice: {title}** — {amount_str}"]
+    if description:
+        parts.append("")
+        parts.append(description)
+    photo = attachment.preview_image
+    if photo and photo.exported_path:
+        parts.append("")
+        parts.append(f"![{title}]({photo.exported_path})")
+    return "\n".join(parts)
+
+
+def _format_invoice_amount(total_amount: Any, currency: str) -> str:
+    """Render an invoice total as ``9.99 USD`` or ``100.00 XTR`` (stars)."""
+    if not isinstance(total_amount, int) or isinstance(total_amount, bool):
+        return currency or "0"
+    if currency == "XTR":
+        return f"{total_amount}.00 XTR"
+    if not currency:
+        return f"{total_amount / 100:.2f}"
+    if total_amount % 100 == 0:
+        return f"{total_amount // 100}.00 {currency}"
+    return f"{total_amount / 100:.2f} {currency}"
+
+
+def _render_markdown_giveaway(attachment: Attachment) -> str:
+    """Render a giveaway as a single Markdown line."""
+    return _giveaway_text(attachment)
+
+
+def _render_markdown_giveaway_result(attachment: Attachment) -> str:
+    """Render a giveaway result as a single Markdown line."""
+    metadata = attachment.metadata or {}
+    bits: list[str] = ["🎁 Giveaway ended"]
+    winners = metadata.get("winners_count")
+    unclaimed = metadata.get("unclaimed_count")
+    if isinstance(winners, int):
+        bits.append(f"{winners} winners")
+    if isinstance(unclaimed, int):
+        bits.append(f"{unclaimed} unclaimed")
+    months = metadata.get("premium_months")
+    stars = metadata.get("stars_amount")
+    if isinstance(months, int) and months > 0:
+        bits.append(f"{months} months Premium")
+    elif isinstance(stars, int) and stars > 0:
+        bits.append(f"{stars} stars")
+    return " · ".join(bits)
+
+
+def _giveaway_text(attachment: Attachment) -> str:
+    """Build the canonical human-readable line for a giveaway."""
+    metadata = attachment.metadata or {}
+    months = metadata.get("premium_months")
+    stars = metadata.get("stars_amount")
+    channels = metadata.get("channel_peer_ids") or []
+    quantity = metadata.get("quantity")
+    until_date = metadata.get("until_date")
+    prize_description = metadata.get("prize_description")
+    bits: list[str] = ["🎁 Giveaway"]
+    if isinstance(quantity, int) and quantity > 1:
+        bits.append(f"{quantity} ×")
+    if isinstance(months, int) and months > 0:
+        bits.append(f"{months} months Premium")
+    elif isinstance(stars, int) and stars > 0:
+        bits.append(f"{stars} stars")
+    if channels:
+        bits.append("in " + ", ".join(f"peer {cid}" for cid in channels))
+    if isinstance(until_date, int) and until_date > 0:
+        until_iso = (
+            datetime.fromtimestamp(until_date, tz=timezone.utc).date().isoformat()
+        )
+        bits.append(f"ends {until_iso}")
+    if isinstance(prize_description, str) and prize_description:
+        bits.append(f"({prize_description})")
+    return " · ".join(bits)
+
+
+def _render_markdown_live_stream(attachment: Attachment) -> str:
+    """Render a live stream placeholder as italic Markdown."""
+    return "*📹 Live stream*"
+
+
+def _render_markdown_map(
+    attachment: Attachment, peer_map: Optional[dict[int, PeerInfo]] = None
+) -> str:
+    """Render a map pin as a Markdown line with OpenStreetMap link."""
+    metadata = attachment.metadata or {}
+    latitude = metadata.get("latitude")
+    longitude = metadata.get("longitude")
+    venue = metadata.get("venue") or {}
+    address = metadata.get("address") or {}
+    live_timeout = metadata.get("live_timeout")
+    title = venue.get("title") or "Location"
+    address_parts: list[str] = []
+    if isinstance(address, dict):
+        street = address.get("street")
+        city = address.get("city")
+        state = address.get("state")
+        country = address.get("country")
+        if street:
+            address_parts.append(str(street))
+        city_state_country = ", ".join(part for part in (city, state, country) if part)
+        if city_state_country:
+            address_parts.append(city_state_country)
+    bits: list[str] = [f"📍 **{title}**"]
+    if address_parts:
+        bits.append(" — ".join(address_parts))
+    if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+        bits.append(
+            f"[{latitude:.5f}, {longitude:.5f}]({_osm_url(latitude, longitude)})"
+        )
+    if isinstance(live_timeout, int) and live_timeout > 0:
+        bits.append(_live_until_label(live_timeout))
+    return " · ".join(bits)
+
+
+def _osm_url(latitude: float, longitude: float) -> str:
+    """Build an OpenStreetMap permalink for ``(lat, lng)``."""
+    return (
+        f"https://www.openstreetmap.org/?mlat={latitude}&mlon={longitude}"
+        f"#map=17/{latitude}/{longitude}"
+    )
+
+
+def _live_until_label(timeout: int) -> str:
+    """Render a liveBroadcastingTimeout (seconds-from-now) as an absolute ``HH:MM``."""
+    until_dt = datetime.fromtimestamp(timeout, tz=timezone.utc)
+    return f"live until {until_dt.strftime('%H:%M')}"
+
+
+def _render_markdown_paid_content(attachment: Attachment) -> str:
+    """Render a paid-content placeholder as Markdown."""
+    metadata = attachment.metadata or {}
+    stars = metadata.get("stars_amount")
+    bits: list[str] = ["Paid media"]
+    if isinstance(stars, int) and stars > 0:
+        bits.append(f"{stars} ★")
+    return f"💎 **{' · '.join(bits)}**"
+
+
+def _render_markdown_story(
+    attachment: Attachment, peer_map: Optional[dict[int, PeerInfo]] = None
+) -> str:
+    """Render a story preview as Markdown with a t.me link."""
+    metadata = attachment.metadata or {}
+    peer_id = metadata.get("peer_id")
+    story_id = metadata.get("story_id")
+    is_mention = bool(metadata.get("is_mention"))
+    name: Optional[str] = None
+    username: Optional[str] = None
+    if peer_map and isinstance(peer_id, int) and peer_id in peer_map:
+        info = peer_map[peer_id]
+        name = info.name
+        username = info.username
+    if not isinstance(story_id, int):
+        return "*📖 Story*"
+    if isinstance(peer_id, int) and username:
+        url = f"https://t.me/{username}/s/{story_id}"
+    else:
+        url = None
+    label = name or f"peer {peer_id}" if isinstance(peer_id, int) else "Story"
+    if is_mention:
+        return f"📖 **{label}** mentioned you in a story" + (
+            f" ([open]({url}))" if url else ""
+        )
+    if url:
+        return f"📖 Story from [{label}]({url})"
+    return f"📖 Story from **{label}**"
+
+
+def _render_markdown_todo(
+    attachment: Attachment, peer_map: Optional[dict[int, PeerInfo]] = None
+) -> str:
+    """Render a todo list as Markdown header + GFM task list."""
+    metadata = attachment.metadata or {}
+    text = (metadata.get("text") or "").strip()
+    items = metadata.get("items") or []
+    completions = metadata.get("completions") or []
+    flags = metadata.get("flags") or {}
+    completed_ids = {
+        completion.get("id")
+        for completion in completions
+        if completion.get("id") is not None
+    }
+    completed_count = sum(1 for item in items if item.get("id") in completed_ids)
+    total = len(items)
+    parts: list[str] = []
+    if text:
+        parts.append(f"**{text}**")
+    parts.append(f"*{completed_count} of {total} completed*")
+    if flags.get("others_can_append"):
+        parts.append("*(others can append)*")
+    if flags.get("others_can_complete"):
+        parts.append("*(others can complete)*")
+    parts.append("")
+    for item in items:
+        item_id = item.get("id")
+        is_done = item_id in completed_ids
+        marker = "x" if is_done else " "
+        parts.append(f"- [{marker}] {item.get('text', '')}")
+    return "\n".join(parts)
+
+
+def _render_markdown_unsupported(attachment: Attachment) -> str:
+    """Render an unsupported-media placeholder as italic Markdown."""
+    return "*❓ (unsupported media)*"
+
+
+def _render_markdown_unknown_kind(attachment: Attachment) -> str:
+    """Markdown fallback for any kind that has no dedicated renderer."""
+    return f"`[{_attachment_description(attachment)}]`"
 
 
 def _peer_names(
@@ -2337,6 +2762,45 @@ def _render_html_attachment(
     if attachment.kind == "action":
         _render_html_service_message(handle, attachment, peer_map, author_id)
         return
+    if attachment.kind == "contact":
+        _render_html_contact_card(handle, attachment, peer_map)
+        return
+    if attachment.kind == "dice":
+        _render_html_dice(handle, attachment)
+        return
+    if attachment.kind == "expired_content":
+        _render_html_expired_content(handle, attachment)
+        return
+    if attachment.kind == "game":
+        _render_html_game_card(handle, attachment)
+        return
+    if attachment.kind == "invoice":
+        _render_html_invoice_card(handle, attachment)
+        return
+    if attachment.kind == "giveaway":
+        _render_html_giveaway_card(handle, attachment, peer_map)
+        return
+    if attachment.kind == "giveaway_result":
+        _render_html_giveaway_result_card(handle, attachment)
+        return
+    if attachment.kind == "live_stream":
+        _render_html_live_stream(handle, attachment)
+        return
+    if attachment.kind == "map":
+        _render_html_map_pin(handle, attachment, peer_map)
+        return
+    if attachment.kind == "paid_content":
+        _render_html_paid_content(handle, attachment)
+        return
+    if attachment.kind == "story":
+        _render_html_story(handle, attachment, peer_map)
+        return
+    if attachment.kind == "todo":
+        _render_html_todo_card(handle, attachment, peer_map)
+        return
+    if attachment.kind == "unsupported":
+        _render_html_unsupported(handle, attachment)
+        return
     label = html.escape(_attachment_label(attachment))
     if attachment.url:
         url = html.escape(attachment.url, quote=True)
@@ -2476,6 +2940,351 @@ def _render_html_webpage_preview(handle, attachment: Attachment) -> None:
         )
 
     handle.write("</div>")
+
+
+def _render_html_contact_card(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+) -> None:
+    """Render a contact as a ``.contact-card`` div with optional vCard link."""
+    metadata = attachment.metadata or {}
+    first_name = (metadata.get("first_name") or "").strip()
+    last_name = (metadata.get("last_name") or "").strip()
+    phone = (metadata.get("phone_number") or "").strip()
+    name = " ".join(part for part in (first_name, last_name) if part).strip()
+    raw_peer_id = metadata.get("peer_id")
+    peer_url = (
+        _peer_url_for(int(raw_peer_id), peer_map)
+        if isinstance(raw_peer_id, int)
+        and not isinstance(raw_peer_id, bool)
+        and raw_peer_id != 0
+        else None
+    )
+    handle.write('<div class="contact-card">')
+    name_html = html.escape(name) if name else html.escape(phone) or "Contact"
+    bits: list[str] = ["👤 "]
+    if peer_url:
+        safe_url = html.escape(peer_url, quote=True)
+        bits.append(
+            f'<a href="{safe_url}" target="_blank" rel="noopener">'
+            f"<strong>{name_html}</strong></a>"
+        )
+    else:
+        bits.append(f"<strong>{name_html}</strong>")
+    if phone:
+        bits.append(f" · {html.escape(phone)}")
+    if peer_url:
+        bits.append(
+            f' · <a href="{html.escape(peer_url, quote=True)}" '
+            f'target="_blank" rel="noopener">Open chat</a>'
+        )
+    if attachment.vcard_path:
+        vcard_url = html.escape(attachment.vcard_path, quote=True)
+        bits.append(f' · <a href="{vcard_url}" download>vCard (.vcf)</a>')
+    handle.write("".join(bits))
+    handle.write("</div>")
+
+
+def _render_html_dice(handle, attachment: Attachment) -> None:
+    """Render a dice as a service-style ``.service-msg`` line."""
+    metadata = attachment.metadata or {}
+    emoji = metadata.get("emoji") or "🎲"
+    value = metadata.get("value")
+    ton_amount = metadata.get("ton_amount")
+    inner_bits: list[str] = []
+    if value is not None:
+        inner_bits.append(f"{html.escape(emoji)} <em>{html.escape(str(value))}</em>")
+    else:
+        inner_bits.append(html.escape(emoji))
+    if ton_amount:
+        inner_bits.append(f" · {html.escape(str(ton_amount))} TON")
+    handle.write(f'<div class="service-msg">{"".join(inner_bits)}</div>')
+
+
+def _render_html_expired_content(handle, attachment: Attachment) -> None:
+    """Render an expired-content placeholder as a service-style line."""
+    metadata = attachment.metadata or {}
+    label = metadata.get("label") or "media"
+    handle.write(
+        f'<div class="service-msg">(<em>expired {html.escape(str(label))}</em>)</div>'
+    )
+
+
+def _render_html_game_card(handle, attachment: Attachment) -> None:
+    """Render a game as a ``.game-card`` div with optional thumbnail."""
+    metadata = attachment.metadata or {}
+    title = (metadata.get("title") or "").strip() or "Game"
+    description = (metadata.get("description") or "").strip()
+    handle.write('<div class="game-card">')
+    handle.write(f'<div class="game-title">{html.escape(title)}</div>')
+    if description:
+        handle.write(f'<div class="game-desc">{html.escape(description)}</div>')
+    image = attachment.preview_image
+    if image and image.exported_path:
+        img_path = html.escape(image.exported_path, quote=True)
+        dim_attr = ""
+        if (
+            isinstance(image.width, int)
+            and isinstance(image.height, int)
+            and image.width > 0
+            and image.height > 0
+        ):
+            dim_attr = f' width="{image.width}" height="{image.height}"'
+        handle.write(
+            f'<img src="{img_path}" alt="{html.escape(title)}" '
+            f'loading="lazy" decoding="async"{dim_attr}>'
+        )
+        handle.write(
+            f'<div class="meta file-meta">'
+            f"{html.escape(_attachment_description(image))}</div>"
+        )
+    handle.write("</div>")
+
+
+def _render_html_invoice_card(handle, attachment: Attachment) -> None:
+    """Render an invoice as a ``.invoice-card`` div with title, amount, photo."""
+    metadata = attachment.metadata or {}
+    title = (metadata.get("title") or "").strip() or "Invoice"
+    amount_str = _format_invoice_amount(
+        metadata.get("total_amount"), metadata.get("currency") or ""
+    )
+    description = (metadata.get("description") or "").strip()
+    photo = attachment.preview_image
+    handle.write('<div class="invoice-card">')
+    if photo and photo.exported_path:
+        img_path = html.escape(photo.exported_path, quote=True)
+        dim_attr = ""
+        if (
+            isinstance(photo.width, int)
+            and isinstance(photo.height, int)
+            and photo.width > 0
+            and photo.height > 0
+        ):
+            dim_attr = f' width="{photo.width}" height="{photo.height}"'
+        handle.write(
+            f'<img src="{img_path}" alt="{html.escape(title)}" '
+            f'loading="lazy" decoding="async"{dim_attr}>'
+        )
+    handle.write(f'<div class="invoice-title">{html.escape(title)}</div>')
+    handle.write(f'<div class="invoice-amount">{html.escape(amount_str)}</div>')
+    if description:
+        handle.write(f'<div class="invoice-desc">{html.escape(description)}</div>')
+    handle.write("</div>")
+
+
+def _render_html_giveaway_card(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+) -> None:
+    """Render a giveaway as a ``.giveaway-card`` div with the canonical line."""
+    text = _giveaway_text(attachment)
+    handle.write('<div class="giveaway-card">')
+    handle.write(f'<div class="giveaway-title">{html.escape(text)}</div>')
+    channels = (attachment.metadata or {}).get("channel_peer_ids") or []
+    if peer_map and channels:
+        names = _join_peer_names_html(list(channels), peer_map)
+        if names:
+            handle.write(f'<div class="giveaway-meta">Channels: {names}</div>')
+    handle.write("</div>")
+
+
+def _render_html_giveaway_result_card(handle, attachment: Attachment) -> None:
+    """Render a giveaway result as a ``.giveaway-card`` div."""
+    text = _render_markdown_giveaway_result(attachment)
+    handle.write('<div class="giveaway-card">')
+    handle.write(f'<div class="giveaway-title">{html.escape(text)}</div>')
+    handle.write("</div>")
+
+
+def _render_html_live_stream(handle, attachment: Attachment) -> None:
+    """Render a live stream placeholder as a service-style line."""
+    handle.write('<div class="service-msg">📹 <em>Live stream</em></div>')
+
+
+def _render_html_map_pin(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+) -> None:
+    """Render a map pin as a ``.map-pin`` div with OpenStreetMap link."""
+    metadata = attachment.metadata or {}
+    latitude = metadata.get("latitude")
+    longitude = metadata.get("longitude")
+    venue = metadata.get("venue") or {}
+    address = metadata.get("address") or {}
+    live_timeout = metadata.get("live_timeout")
+    title = (venue.get("title") or "").strip() or "Location"
+    handle.write('<div class="map-pin">')
+    handle.write(
+        f'<div class="map-venue">📍 <strong>{html.escape(title)}</strong></div>'
+    )
+    if isinstance(address, dict):
+        street = address.get("street")
+        city = address.get("city")
+        state = address.get("state")
+        country = address.get("country")
+        if street:
+            handle.write(f'<div class="map-address">{html.escape(str(street))}</div>')
+        city_state_country = ", ".join(part for part in (city, state, country) if part)
+        if city_state_country:
+            handle.write(
+                f'<div class="map-address">{html.escape(city_state_country)}</div>'
+            )
+    if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+        map_url = html.escape(_osm_url(latitude, longitude), quote=True)
+        handle.write(
+            f'<div class="map-meta">{latitude:.5f}, {longitude:.5f} · '
+            f'<a href="{map_url}" target="_blank" rel="noopener">'
+            f"Open in OpenStreetMap</a>"
+        )
+        if isinstance(live_timeout, int) and live_timeout > 0:
+            handle.write(f" · {html.escape(_live_until_label(live_timeout))}")
+        handle.write("</div>")
+    elif isinstance(live_timeout, int) and live_timeout > 0:
+        handle.write(
+            f'<div class="map-meta">'
+            f"{html.escape(_live_until_label(live_timeout))}</div>"
+        )
+    handle.write("</div>")
+
+
+def _render_html_paid_content(handle, attachment: Attachment) -> None:
+    """Render a paid-content placeholder as a service-style line."""
+    metadata = attachment.metadata or {}
+    stars = metadata.get("stars_amount")
+    bits: list[str] = ["💎 Paid media"]
+    if isinstance(stars, int) and stars > 0:
+        bits.append(f" · {stars} ★")
+    handle.write(f'<div class="service-msg">{html.escape("".join(bits))}</div>')
+
+
+def _render_html_story(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+) -> None:
+    """Render a story as a ``.story`` div with a t.me link."""
+    metadata = attachment.metadata or {}
+    peer_id = metadata.get("peer_id")
+    story_id = metadata.get("story_id")
+    is_mention = bool(metadata.get("is_mention"))
+    info = (
+        peer_map.get(int(peer_id))
+        if peer_map and isinstance(peer_id, int) and peer_id in peer_map
+        else None
+    )
+    name = (
+        info.name
+        if info is not None
+        else (f"peer {peer_id}" if isinstance(peer_id, int) else "Story")
+    )
+    username = info.username if info is not None else None
+    if isinstance(story_id, int) and username:
+        url = f"https://t.me/{username}/s/{story_id}"
+    else:
+        url = None
+    handle.write('<div class="story">')
+    if is_mention:
+        handle.write(f"<strong>{html.escape(name)}</strong> mentioned you in a story ")
+        if url:
+            safe_url = html.escape(url, quote=True)
+            handle.write(
+                f'(<a href="{safe_url}" target="_blank" rel="noopener">open</a>)'
+            )
+    else:
+        handle.write("📖 Story from ")
+        if url:
+            safe_url = html.escape(url, quote=True)
+            handle.write(
+                f'<a href="{safe_url}" target="_blank" rel="noopener">'
+                f"{html.escape(name)}</a>"
+            )
+        else:
+            handle.write(html.escape(name))
+    handle.write("</div>")
+
+
+def _render_html_todo_card(
+    handle,
+    attachment: Attachment,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
+) -> None:
+    """Render a todo as a ``.todo-card`` div with checkboxes + completions."""
+    metadata = attachment.metadata or {}
+    text = (metadata.get("text") or "").strip()
+    items = metadata.get("items") or []
+    completions = metadata.get("completions") or []
+    flags = metadata.get("flags") or {}
+    completed_ids = {
+        completion.get("id")
+        for completion in completions
+        if completion.get("id") is not None
+    }
+    completion_by_id = {
+        completion.get("id"): completion
+        for completion in completions
+        if completion.get("id") is not None
+    }
+    completed_count = sum(1 for item in items if item.get("id") in completed_ids)
+    total = len(items)
+    handle.write('<div class="todo-card">')
+    if text:
+        handle.write(f'<div class="todo-header">{html.escape(text)}</div>')
+    flag_notes: list[str] = []
+    if flags.get("others_can_append"):
+        flag_notes.append("others can append")
+    if flags.get("others_can_complete"):
+        flag_notes.append("others can complete")
+    if flag_notes:
+        handle.write(
+            f'<div class="todo-flags">{html.escape(" · ".join(flag_notes))}</div>'
+        )
+    handle.write(
+        f'<div class="todo-progress">'
+        f"{html.escape(f'{completed_count} of {total} completed')}</div>"
+    )
+    handle.write('<ul class="todo-items">')
+    for item in items:
+        item_id = item.get("id")
+        is_done = item_id in completed_ids
+        item_text = item.get("text", "")
+        checked = " checked" if is_done else ""
+        handle.write(
+            f'<li><input type="checkbox" disabled{checked}> {html.escape(item_text)}'
+        )
+        if is_done:
+            completion = completion_by_id.get(item_id) or {}
+            completer_id = completion.get("completed_by")
+            completer_name = (
+                _peer_label(int(completer_id), peer_map)
+                if isinstance(completer_id, int) and completer_id != 0
+                else None
+            )
+            raw_date = completion.get("date")
+            date_label = ""
+            if isinstance(raw_date, int) and raw_date > 0:
+                date_label = datetime.fromtimestamp(raw_date, tz=timezone.utc).strftime(
+                    "%Y-%m-%d"
+                )
+            note_bits: list[str] = []
+            if completer_name:
+                note_bits.append(html.escape(completer_name))
+            if date_label:
+                note_bits.append(html.escape(date_label))
+            if note_bits:
+                handle.write(
+                    f' <span class="completion">— {", ".join(note_bits)}</span>'
+                )
+        handle.write("</li>")
+    handle.write("</ul>")
+    handle.write("</div>")
+
+
+def _render_html_unsupported(handle, attachment: Attachment) -> None:
+    """Render an unsupported-media placeholder as a service-style line."""
+    handle.write('<div class="service-msg">❓ (<em>unsupported media</em>)</div>')
 
 
 def _back_to_top_script() -> str:
