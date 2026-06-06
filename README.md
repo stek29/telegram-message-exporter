@@ -2,7 +2,7 @@
 
 > Offline recovery and transcript export for the native Telegram for macOS app.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/soakes/telegram-message-exporter/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/soakes/telegram-message-exporter/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/stek29/telegram-message-exporter/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/stek29/telegram-message-exporter/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-macOS-111111.svg?style=flat-square&logo=apple&logoColor=white)](#requirements)
 [![Telegram](https://img.shields.io/badge/Telegram-native%20macOS-2CA5E0.svg?style=flat-square&logo=telegram&logoColor=white)](https://macos.telegram.org/)
@@ -178,7 +178,7 @@ brew install sqlcipher
 From a clone:
 
 ```bash
-git clone https://github.com/soakes/telegram-message-exporter.git
+git clone https://github.com/stek29/telegram-message-exporter.git
 cd telegram-message-exporter
 python3 -m venv .venv
 source .venv/bin/activate
@@ -188,7 +188,7 @@ pip install -e .
 Or install the latest revision directly from GitHub:
 
 ```bash
-pip install -U "git+https://github.com/soakes/telegram-message-exporter.git"
+pip install -U "git+https://github.com/stek29/telegram-message-exporter.git"
 ```
 
 ### 2. Locate Telegram's database
