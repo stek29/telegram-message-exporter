@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
@@ -28,6 +28,42 @@ class Attachment:
     metadata: Optional[dict[str, Any]] = None
     preview_image: Optional["Attachment"] = None
     preview_video: Optional["Attachment"] = None
+    alternate_dimensions: dict[str, tuple[Optional[int], Optional[int]]] = field(
+        default_factory=dict
+    )
+    is_preview_fallback: bool = False
+
+    def is_image(self) -> bool:
+        """True for image-kind attachments and any preview fallback to an image.
+
+        On a preview fallback the original ``kind`` is no longer
+        authoritative (a video whose only cached file is a JPEG
+        preview should be rendered as an ``<img>``), so the mime
+        type prefix is used instead.
+        """
+        if self.is_preview_fallback:
+            return (self.mime_type or "").startswith("image/")
+        if self.kind == "image":
+            return True
+        if self.kind == "sticker" and self.mime_type in {"image/png", "image/webp"}:
+            return True
+        return False
+
+    def is_video(self) -> bool:
+        """True for video-kind attachments and any preview fallback to a video."""
+        if self.is_preview_fallback:
+            return (self.mime_type or "").startswith("video/")
+        if self.kind == "video":
+            return True
+        if self.kind == "sticker" and self.mime_type in {"video/mp4", "video/webm"}:
+            return True
+        return False
+
+    def is_audio(self) -> bool:
+        """True for audio-kind attachments and any preview fallback to audio."""
+        if self.is_preview_fallback:
+            return (self.mime_type or "").startswith("audio/")
+        return self.kind in {"voice", "audio"}
 
 
 @dataclass(frozen=True)

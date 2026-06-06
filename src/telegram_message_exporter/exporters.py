@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import logging
 import re
 import shutil
 from dataclasses import dataclass, replace
@@ -16,6 +17,8 @@ from .models import Attachment, ForwardedSegment, Message, PeerInfo
 from .postbox import _decode_peer_ids_from_buffer, peer_url
 from .schema import ConferenceCallFlags, PhoneCallDiscardReason, TelegramMediaActionType
 from .utils import linkify_html, linkify_markdown, to_local
+
+logger = logging.getLogger(__name__)
 
 HTML_BOOTSTRAP = (
     '<link rel="stylesheet" '
@@ -558,7 +561,84 @@ def _copy_single_attachment(
 
     The returned attachment has ``selected_cache_key`` and ``exported_path``
     set. ``copied_count`` is incremented when a new file is written.
+
+    The resolver tries the main file first (``cache_key`` /
+    ``alternate_cache_keys`` / ``source_path``). If none of those are
+    present on disk, the attachment's :attr:`Attachment.preview_image`
+    or :attr:`Attachment.preview_video` is promoted to be the rendered
+    file. The returned attachment then carries the preview's mime type
+    and dimensions so the HTML/Markdown renderers don't try to load a
+    JPEG as a video, and :attr:`Attachment.is_preview_fallback` is set
+    so the description can add a "preview" suffix.
+
+    Webpages are an exception: their ``preview_image`` and
+    ``preview_video`` are sub-attachments rendered inside the
+    link-preview card, not fallbacks for a missing main file. Promoting
+    them here would clear the preview fields and leave the card empty,
+    so the recursion in :func:`copy_message_media` is left to copy the
+    sub-attachments directly.
     """
+    main_attachment, main_count = _copy_to_target(
+        attachment, media_dir, target_dir, copied_keys
+    )
+    if main_count > 0 or main_attachment.exported_path:
+        logger.debug(
+            "attachment kind=%s: main file copied (path=%s)",
+            attachment.kind,
+            main_attachment.exported_path,
+        )
+        return main_attachment, main_count
+    if attachment.kind == "webpage":
+        logger.debug("attachment kind=webpage: skipping preview promotion")
+        return attachment, 0
+    if attachment.preview_image is not None:
+        logger.debug(
+            "attachment kind=%s: trying preview_image (key=%s)",
+            attachment.kind,
+            attachment.preview_image.cache_key,
+        )
+        promoted, added = _promote_preview(
+            attachment,
+            attachment.preview_image,
+            media_dir,
+            target_dir,
+            copied_keys,
+        )
+        if added > 0 or promoted.exported_path:
+            return promoted, added
+    if attachment.preview_video is not None:
+        logger.debug(
+            "attachment kind=%s: trying preview_video (key=%s)",
+            attachment.kind,
+            attachment.preview_video.cache_key,
+        )
+        promoted, added = _promote_preview(
+            attachment,
+            attachment.preview_video,
+            media_dir,
+            target_dir,
+            copied_keys,
+        )
+        if added > 0 or promoted.exported_path:
+            return promoted, added
+    logger.debug(
+        "attachment kind=%s: no file copied (main key=%s, "
+        "preview_image=%s, preview_video=%s)",
+        attachment.kind,
+        attachment.cache_key,
+        attachment.preview_image.cache_key if attachment.preview_image else None,
+        attachment.preview_video.cache_key if attachment.preview_video else None,
+    )
+    return attachment, 0
+
+
+def _copy_to_target(
+    attachment: Attachment,
+    media_dir: Path,
+    target_dir: Path,
+    copied_keys: set[str],
+) -> tuple[Attachment, int]:
+    """Try to copy the attachment's own main file. Returns (attachment, added)."""
     cache_keys = tuple(
         key
         for key in (
@@ -572,6 +652,15 @@ def _copy_single_attachment(
     )
     if not cache_keys and (direct_source is None or not direct_source.is_file()):
         return attachment, 0
+    on_disk = {key: (media_dir / key).is_file() for key in cache_keys}
+    logger.debug(
+        "_copy_to_target kind=%s mime=%s cache_keys=%s on_disk=%s direct_source=%s",
+        attachment.kind,
+        attachment.mime_type,
+        cache_keys,
+        on_disk,
+        direct_source,
+    )
     selected_key = next(
         (key for key in cache_keys if (media_dir / key).is_file()),
         None,
@@ -591,6 +680,16 @@ def _copy_single_attachment(
         shutil.copy2(source, target)
         copied_keys.add(target_name)
         copied_count = 1
+    new_width = attachment.width
+    new_height = attachment.height
+    if selected_key is not None and selected_key != attachment.cache_key:
+        dims = attachment.alternate_dimensions.get(selected_key)
+        if dims is not None:
+            alt_width, alt_height = dims
+            if isinstance(alt_width, int):
+                new_width = alt_width
+            if isinstance(alt_height, int):
+                new_height = alt_height
     return (
         replace(
             attachment,
@@ -600,9 +699,59 @@ def _copy_single_attachment(
                 else attachment.selected_cache_key
             ),
             exported_path=(Path(target_dir.name) / target_name).as_posix(),
+            width=new_width,
+            height=new_height,
         ),
         copied_count,
     )
+
+
+def _promote_preview(
+    parent: Attachment,
+    preview: Attachment,
+    media_dir: Path,
+    target_dir: Path,
+    copied_keys: set[str],
+) -> tuple[Attachment, int]:
+    """Use a ``preview_image`` / ``preview_video`` as the rendered file.
+
+    Returns a new top-level :class:`Attachment` that keeps the parent's
+    description context (kind, filename, size, sticker_emoji, url) but
+    carries the preview's mime, dimensions, cache key, and
+    ``exported_path``. ``is_preview_fallback`` is set so the renderer
+    and description pick up the "preview" suffix.
+    """
+    copied_preview, added = _copy_to_target(preview, media_dir, target_dir, copied_keys)
+    if not copied_preview.exported_path:
+        logger.debug(
+            "_promote_preview: preview key=%s not on disk, no fallback",
+            preview.cache_key,
+        )
+        return parent, 0
+    logger.debug(
+        "_promote_preview: promoted parent kind=%s to preview key=%s mime=%s",
+        parent.kind,
+        copied_preview.cache_key,
+        copied_preview.mime_type,
+    )
+    promoted = replace(
+        parent,
+        cache_key=copied_preview.cache_key,
+        alternate_cache_keys=(),
+        selected_cache_key=copied_preview.selected_cache_key
+        or copied_preview.cache_key,
+        mime_type=copied_preview.mime_type or parent.mime_type,
+        width=copied_preview.width
+        if copied_preview.width is not None
+        else parent.width,
+        height=copied_preview.height
+        if copied_preview.height is not None
+        else parent.height,
+        preview_image=None,
+        preview_video=None,
+        is_preview_fallback=True,
+    )
+    return replace(promoted, exported_path=copied_preview.exported_path), added
 
 
 def copy_message_media(
@@ -894,16 +1043,9 @@ def _attachment_description(attachment: Attachment) -> str:
     cache_key = attachment.selected_cache_key or attachment.cache_key
     if cache_key:
         details.append(f"cache: {cache_key}")
-    if _is_preview_attachment(attachment):
+    if attachment.is_preview_fallback:
         details.append("preview")
     return " | ".join(details)
-
-
-def _is_preview_attachment(attachment: Attachment) -> bool:
-    """Return True when the rendered file came from an alternate cache key."""
-    if not attachment.selected_cache_key or not attachment.alternate_cache_keys:
-        return False
-    return attachment.selected_cache_key in attachment.alternate_cache_keys
 
 
 def _human_size(n: int) -> str:
@@ -1519,7 +1661,9 @@ def _render_markdown_attachment(
     if attachment.url:
         return f"[{label}]({attachment.url})"
     if attachment.exported_path:
-        if attachment.kind == "image":
+        if attachment.is_preview_fallback:
+            primary = _render_markdown_preview_fallback(attachment, label)
+        elif attachment.kind == "image":
             primary = f"![{label}]({attachment.exported_path})"
         else:
             primary = f"[{label}]({attachment.exported_path})"
@@ -1527,6 +1671,25 @@ def _render_markdown_attachment(
     if attachment.kind == "poll" and attachment.metadata:
         return _render_markdown_poll(attachment.metadata, peer_map)
     return f"`[{_attachment_description(attachment)}]`"
+
+
+def _render_markdown_preview_fallback(attachment: Attachment, label: str) -> str:
+    """Render the preview that was promoted to be the main file as Markdown.
+
+    Image previews get inline ``![]()`` so the image is visible in
+    Markdown viewers; video previews get a link with a play marker;
+    everything else falls through to a plain download link. The
+    surrounding ``file-meta`` description line still shows the
+    original ``kind`` and the "preview" suffix.
+    """
+    mime_type = attachment.mime_type or ""
+    if mime_type.startswith("image/"):
+        return f"![{label}]({attachment.exported_path})"
+    if mime_type.startswith("video/"):
+        return f"[▶ {label}]({attachment.exported_path})"
+    if mime_type.startswith("audio/"):
+        return f"[▶ {label}]({attachment.exported_path})"
+    return f"[{label}]({attachment.exported_path})"
 
 
 def _render_markdown_webpage_preview(attachment: Attachment) -> str:
@@ -2191,15 +2354,7 @@ def _render_html_attachment(
             and attachment.height > 0
         ):
             dim_attr = f' width="{attachment.width}" height="{attachment.height}"'
-        if attachment.kind == "image" or (
-            attachment.kind == "sticker"
-            and attachment.mime_type in {"image/png", "image/webp"}
-        ):
-            handle.write(
-                f'<div><img src="{path}" alt="{label}" loading="lazy" '
-                f'decoding="async"{dim_attr}></div>'
-            )
-        elif attachment.kind == "video_message":
+        if attachment.kind == "video_message" and not attachment.is_preview_fallback:
             handle.write(
                 f'<div class="video-message" data-video-message>'
                 f'<video preload="metadata" playsinline loop{dim_attr}>'
@@ -2210,16 +2365,18 @@ def _render_html_attachment(
                 f'<path d="M8 5v14l11-7z"/></svg>'
                 f"</button></div>"
             )
-        elif attachment.kind == "video" or (
-            attachment.kind == "sticker"
-            and attachment.mime_type in {"video/mp4", "video/webm"}
-        ):
+        elif attachment.is_image():
+            handle.write(
+                f'<div><img src="{path}" alt="{label}" loading="lazy" '
+                f'decoding="async"{dim_attr}></div>'
+            )
+        elif attachment.is_video():
             handle.write(
                 f'<div><video controls preload="none"{dim_attr}>'
                 f'<source src="{path}" '
                 f'type="{mime_type}"></video></div>'
             )
-        elif attachment.kind in {"voice", "audio"}:
+        elif attachment.is_audio():
             handle.write(
                 f'<div><audio controls preload="none"><source src="{path}" '
                 f'type="{mime_type}"></audio></div>'

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Iterable, Optional
@@ -116,6 +117,12 @@ def cmd_list_peers(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export messages to Markdown, HTML, or CSV."""
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="[%(name)s] %(message)s",
+            stream=sys.stderr,
+        )
     db_path, conn = _open_for_reading(args)
     table = args.table or detect_message_table(conn)
 

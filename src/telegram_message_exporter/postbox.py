@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import io
+import logging
 import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,6 +20,8 @@ from .schema import (
     PostboxTable,
     TelegramMediaActionType,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ByteReader:
@@ -630,60 +633,270 @@ def _file_attribute_data(
     )
 
 
-def _object_resources(value: Any) -> list[Any]:
-    resources: list[Any] = []
-    if isinstance(value, PostboxObject):
-        resource = value.fields.get("resource")
-        if isinstance(resource, PostboxObject):
-            resources.append(resource)
-    elif isinstance(value, list):
-        for item in value:
-            resources.extend(_object_resources(item))
-    return resources
+@dataclass(frozen=True)
+class _FileResourceBuckets:
+    """Categorized resources extracted from a ``TelegramMediaFile``.
+
+    The iOS Postbox layout groups resources by the role they play in
+    rendering. The main file lives under ``resource`` (and may have
+    transcoded alternatives under ``alternative_representations``).
+    Image previews and video thumbnails live under their own keys
+    (``preview_representations``, ``video_thumbnails``,
+    ``video_cover``) and are typically the only thing locally cached
+    for files the user has never opened.
+
+    Preview entries carry the wrapping object's ``width``/``height`` so
+    callers can size the rendered preview without re-walking the source
+    payload.
+    """
+
+    main: tuple[PostboxObject, ...] = ()
+    main_alternates: tuple[PostboxObject, ...] = ()
+    preview_images: tuple[tuple[PostboxObject, Optional[int], Optional[int]], ...] = ()
+    preview_videos: tuple[tuple[PostboxObject, Optional[int], Optional[int]], ...] = ()
+    source_path: Optional[str] = None
 
 
-def _file_resources(fields: dict[str, Any]) -> list[Any]:
-    resources = [fields.get("resource")]
-    resources.extend(_object_resources(fields.get("preview_representations")))
-    resources.extend(_object_resources(fields.get("video_thumbnails")))
-    video_cover = fields.get("video_cover")
-    if isinstance(video_cover, PostboxObject):
-        resources.extend(_object_resources(video_cover.fields.get("representations")))
-        resources.extend(
-            _object_resources(video_cover.fields.get("video_representations"))
-        )
-    for alternative in fields.get("alternative_representations") or []:
-        if isinstance(alternative, PostboxObject):
-            alternative_fields = alternative.fields
-            resources.append(alternative_fields.get("resource"))
-            resources.extend(
-                _object_resources(alternative_fields.get("preview_representations"))
-            )
-            resources.extend(
-                _object_resources(alternative_fields.get("video_thumbnails"))
-            )
-    return resources
+def _bucket_resource(
+    buckets: list[PostboxObject],
+    seen: set[str],
+    resource: Any,
+) -> None:
+    if not isinstance(resource, PostboxObject):
+        return
+    key = _resource_cache_key(resource)
+    if not key or key in seen:
+        return
+    seen.add(key)
+    buckets.append(resource)
 
 
-def _file_resource_keys(
-    fields: dict[str, Any],
-) -> tuple[Optional[str], tuple[str, ...], Optional[str]]:
-    resources = _file_resources(fields)
-    keys: list[str] = []
-    source_path = None
-    for resource in resources:
+def _bucket_previews(
+    buckets: list[tuple[PostboxObject, Optional[int], Optional[int]]],
+    seen: set[str],
+    items: Any,
+) -> None:
+    """Pick up ``TelegramMediaImageRepresentation`` wrappers for previews.
+
+    The resource inside a preview representation is typically a
+    ``CloudPhotoSizeMediaResource`` (for cloud-cached photo sizes), but
+    Telegram also uses ``CloudDocumentSizeMediaResource`` for medium
+    thumbnails of non-photo documents (e.g. a PNG sent as a document).
+    Both kinds are valid image previews — the resource type doesn't
+    determine the semantic role, the field it was pulled from does.
+    """
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if not isinstance(item, PostboxObject):
+            continue
+        resource = item.fields.get("resource")
+        if not isinstance(resource, PostboxObject):
+            continue
+        if resource.type_name not in (
+            "CloudPhotoSizeMediaResource",
+            "CloudDocumentSizeMediaResource",
+        ):
+            continue
         key = _resource_cache_key(resource)
-        if key and key not in keys:
-            keys.append(key)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        width = item.fields.get("width")
+        height = item.fields.get("height")
+        buckets.append((resource, width, height))
+
+
+def _bucket_video_thumbnails(
+    buckets: list[tuple[PostboxObject, Optional[int], Optional[int]]],
+    seen: set[str],
+    items: Any,
+) -> None:
+    """Pick up ``VideoThumbnail`` wrappers for video thumbnail previews."""
+    if not isinstance(items, list):
+        return
+    for item in items:
+        if not isinstance(item, PostboxObject):
+            continue
+        resource = item.fields.get("resource")
+        if not isinstance(resource, PostboxObject):
+            continue
+        if resource.type_name != "CloudDocumentSizeMediaResource":
+            continue
+        key = _resource_cache_key(resource)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        width = item.fields.get("width")
+        height = item.fields.get("height")
+        buckets.append((resource, width, height))
+
+
+def _file_resource_buckets(fields: dict[str, Any]) -> _FileResourceBuckets:
+    """Split a ``TelegramMediaFile.fields`` payload into resource buckets."""
+    main: list[PostboxObject] = []
+    main_alternates: list[PostboxObject] = []
+    preview_images: list[tuple[PostboxObject, Optional[int], Optional[int]]] = []
+    preview_videos: list[tuple[PostboxObject, Optional[int], Optional[int]]] = []
+    seen_main: set[str] = set()
+    seen_alternate: set[str] = set()
+    seen_preview_image: set[str] = set()
+    seen_preview_video: set[str] = set()
+    source_path: Optional[str] = None
+
+    def remember_source(resource: Any) -> None:
+        nonlocal source_path
         if (
             source_path is None
             and isinstance(resource, PostboxObject)
             and isinstance(resource.fields.get("local_file_path"), str)
         ):
             source_path = resource.fields["local_file_path"]
-    if not keys:
-        return None, (), source_path
-    return keys[0], tuple(keys[1:]), source_path
+
+    primary = fields.get("resource")
+    if isinstance(primary, PostboxObject):
+        _bucket_resource(main, seen_main, primary)
+        remember_source(primary)
+
+    for alternative in fields.get("alternative_representations") or []:
+        if not isinstance(alternative, PostboxObject):
+            continue
+        alt_resource = alternative.fields.get("resource")
+        if isinstance(alt_resource, PostboxObject):
+            _bucket_resource(main_alternates, seen_alternate, alt_resource)
+            remember_source(alt_resource)
+        _bucket_previews(
+            preview_images,
+            seen_preview_image,
+            alternative.fields.get("preview_representations"),
+        )
+        _bucket_video_thumbnails(
+            preview_videos,
+            seen_preview_video,
+            alternative.fields.get("video_thumbnails"),
+        )
+
+    _bucket_previews(
+        preview_images, seen_preview_image, fields.get("preview_representations")
+    )
+    _bucket_video_thumbnails(
+        preview_videos, seen_preview_video, fields.get("video_thumbnails")
+    )
+    video_cover = fields.get("video_cover")
+    if isinstance(video_cover, PostboxObject):
+        _bucket_previews(
+            preview_images,
+            seen_preview_image,
+            video_cover.fields.get("representations"),
+        )
+        _bucket_video_thumbnails(
+            preview_videos,
+            seen_preview_video,
+            video_cover.fields.get("video_representations"),
+        )
+
+    return _FileResourceBuckets(
+        main=tuple(main),
+        main_alternates=tuple(main_alternates),
+        preview_images=tuple(preview_images),
+        preview_videos=tuple(preview_videos),
+        source_path=source_path,
+    )
+
+
+def _file_resource_keys(
+    buckets: _FileResourceBuckets,
+) -> tuple[Optional[str], tuple[str, ...], Optional[str]]:
+    """Return ``(main_key, alternate_keys, source_path)`` for a file payload."""
+    main_keys: list[str] = []
+    for resource in (*buckets.main, *buckets.main_alternates):
+        key = _resource_cache_key(resource)
+        if key and key not in main_keys:
+            main_keys.append(key)
+    if not main_keys:
+        return None, (), buckets.source_path
+    return main_keys[0], tuple(main_keys[1:]), buckets.source_path
+
+
+def _pick_best_preview_image(
+    entries: tuple[tuple[PostboxObject, Optional[int], Optional[int]], ...],
+) -> Optional[Attachment]:
+    """Pick the largest image preview (by area) and return it as an Attachment."""
+    best_key: Optional[str] = None
+    best_area = -1
+    best_width: Optional[int] = None
+    best_height: Optional[int] = None
+    for resource, width, height in entries:
+        key = _resource_cache_key(resource)
+        if not key:
+            continue
+        area = 0
+        if (
+            isinstance(width, int)
+            and not isinstance(width, bool)
+            and isinstance(height, int)
+            and not isinstance(height, bool)
+        ):
+            area = width * height
+        if area > best_area or (area == best_area and best_key is None):
+            best_key = key
+            best_area = area
+            best_width = width
+            best_height = height
+    if best_key is None:
+        return None
+    return Attachment(
+        kind="image",
+        mime_type="image/jpeg",
+        cache_key=best_key,
+        alternate_cache_keys=(),
+        width=best_width,
+        height=best_height,
+    )
+
+
+def _pick_best_preview_video(
+    entries: tuple[tuple[PostboxObject, Optional[int], Optional[int]], ...],
+) -> Optional[Attachment]:
+    """Pick the best video thumbnail preview and return it as an Attachment.
+
+    Prefers the entry whose resource's ``size_spec`` is ``"f"`` (full
+    size) when present, else the first available. ``VideoThumbnail``
+    files are real videos (mp4/webm), so the kind is ``"video"`` and
+    the mime type matches what iOS stores for round-video previews.
+    """
+    fallback_key: Optional[str] = None
+    fallback_width: Optional[int] = None
+    fallback_height: Optional[int] = None
+    full_key: Optional[str] = None
+    full_width: Optional[int] = None
+    full_height: Optional[int] = None
+    for resource, width, height in entries:
+        key = _resource_cache_key(resource)
+        if not key:
+            continue
+        if resource.fields.get("size_spec") == "f":
+            full_key = key
+            full_width = width
+            full_height = height
+            break
+        if fallback_key is None:
+            fallback_key = key
+            fallback_width = width
+            fallback_height = height
+    chosen_key = full_key or fallback_key
+    if chosen_key is None:
+        return None
+    chosen_width = full_width if full_key else fallback_width
+    chosen_height = full_height if full_key else fallback_height
+    return Attachment(
+        kind="video",
+        mime_type="video/mp4",
+        cache_key=chosen_key,
+        alternate_cache_keys=(),
+        width=chosen_width,
+        height=chosen_height,
+    )
 
 
 def _webpage_attachments(media: PostboxObject) -> list[Attachment]:
@@ -935,7 +1148,70 @@ def media_attachments(media: Any) -> list[Attachment]:
             kind = "image"
         else:
             kind = "file"
-        cache_key, alternate_cache_keys, source_path = _file_resource_keys(fields)
+        buckets = _file_resource_buckets(fields)
+        cache_key, alternate_cache_keys, source_path = _file_resource_keys(buckets)
+        preview_image = _pick_best_preview_image(buckets.preview_images)
+        preview_video = _pick_best_preview_video(buckets.preview_videos)
+        logger.debug(
+            "TelegramMediaFile kind=%s mime=%s main=%s alternates=%s "
+            "preview_image=%s preview_video=%s source_path=%s",
+            kind,
+            mime_type,
+            cache_key,
+            alternate_cache_keys,
+            preview_image.cache_key if preview_image else None,
+            preview_video.cache_key if preview_video else None,
+            source_path,
+        )
+        logger.debug(
+            "TelegramMediaFile fields=%s",
+            {
+                key: (
+                    type(value).__name__
+                    if not isinstance(value, PostboxObject)
+                    else f"PostboxObject({value.type_name})"
+                )
+                for key, value in fields.items()
+            },
+        )
+        for alt in fields.get("alternative_representations") or []:
+            if isinstance(alt, PostboxObject):
+                alt_resource = alt.fields.get("resource")
+                logger.debug(
+                    "  alternative_representation resource=%s key=%s",
+                    type(alt_resource).__name__
+                    if not isinstance(alt_resource, PostboxObject)
+                    else alt_resource.type_name,
+                    _resource_cache_key(alt_resource)
+                    if isinstance(alt_resource, PostboxObject)
+                    else None,
+                )
+        for vt in fields.get("video_thumbnails") or []:
+            if isinstance(vt, PostboxObject):
+                vt_resource = vt.fields.get("resource")
+                logger.debug(
+                    "  video_thumbnail resource=%s key=%s",
+                    type(vt_resource).__name__
+                    if not isinstance(vt_resource, PostboxObject)
+                    else vt_resource.type_name,
+                    _resource_cache_key(vt_resource)
+                    if isinstance(vt_resource, PostboxObject)
+                    else None,
+                )
+        for pr in fields.get("preview_representations") or []:
+            if isinstance(pr, PostboxObject):
+                pr_resource = pr.fields.get("resource")
+                logger.debug(
+                    "  preview_representation resource=%s key=%s width=%s height=%s",
+                    type(pr_resource).__name__
+                    if not isinstance(pr_resource, PostboxObject)
+                    else pr_resource.type_name,
+                    _resource_cache_key(pr_resource)
+                    if isinstance(pr_resource, PostboxObject)
+                    else None,
+                    pr.fields.get("width"),
+                    pr.fields.get("height"),
+                )
         raw_size = fields.get("size")
         if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
             size = None
@@ -953,6 +1229,8 @@ def media_attachments(media: Any) -> list[Attachment]:
                 height=height,
                 size=size,
                 sticker_emoji=sticker_emoji,
+                preview_image=preview_image,
+                preview_video=preview_video,
             )
         ]
 
@@ -975,15 +1253,34 @@ def media_attachments(media: Any) -> list[Attachment]:
         representation = candidates[0]
         representation_fields = representation.fields
         cache_keys: list[str] = []
+        alternate_dimensions: dict[str, tuple[Optional[int], Optional[int]]] = {}
         for candidate in candidates:
             key = _resource_cache_key(candidate.fields.get("resource"))
-            if key and key not in cache_keys:
-                cache_keys.append(key)
+            if not key or key in cache_keys:
+                continue
+            cache_keys.append(key)
+            width = candidate.fields.get("width")
+            height = candidate.fields.get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                alternate_dimensions[key] = (width, height)
+        preview_video: Optional[Attachment] = None
         for video_representation in fields.get("video_representations") or []:
-            if isinstance(video_representation, PostboxObject):
-                key = _resource_cache_key(video_representation.fields.get("resource"))
-                if key and key not in cache_keys:
-                    cache_keys.append(key)
+            if not isinstance(video_representation, PostboxObject):
+                continue
+            video_key = _resource_cache_key(video_representation.fields.get("resource"))
+            if not video_key:
+                continue
+            if video_key not in cache_keys:
+                cache_keys.append(video_key)
+            if preview_video is None:
+                preview_video = Attachment(
+                    kind="video",
+                    mime_type="video/mp4",
+                    cache_key=video_key,
+                    alternate_cache_keys=(),
+                    width=video_representation.fields.get("width"),
+                    height=video_representation.fields.get("height"),
+                )
         # The iOS TelegramMediaImageRepresentation and CloudPhotoSizeMediaResource
         # do not persist a mime type in the database — the server infers it on
         # upload. Assume JPEG for photos rendered through this path.
@@ -1011,6 +1308,8 @@ def media_attachments(media: Any) -> list[Attachment]:
                 width=representation_fields.get("width"),
                 height=representation_fields.get("height"),
                 size=image_size,
+                preview_video=preview_video,
+                alternate_dimensions=alternate_dimensions,
             )
         ]
 
