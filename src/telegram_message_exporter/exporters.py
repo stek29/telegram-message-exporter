@@ -2818,10 +2818,12 @@ def _render_html_attachment(
             and attachment.height > 0
         ):
             dim_attr = f' width="{attachment.width}" height="{attachment.height}"'
+        poster_attr = _html_video_poster_attr(attachment)
         if attachment.kind == "video_message" and not attachment.is_preview_fallback:
             handle.write(
                 f'<div class="video-message" data-video-message>'
-                f'<video preload="metadata" playsinline loop{dim_attr}>'
+                f'<video preload="metadata" playsinline loop'
+                f"{poster_attr}{dim_attr}>"
                 f'<source src="{path}" type="{mime_type}"></video>'
                 f'<button class="play-overlay" type="button" '
                 f'aria-label="Play video message">'
@@ -2836,7 +2838,7 @@ def _render_html_attachment(
             )
         elif attachment.is_video():
             handle.write(
-                f'<div><video controls preload="none"{dim_attr}>'
+                f'<div><video controls preload="none"{poster_attr}{dim_attr}>'
                 f'<source src="{path}" '
                 f'type="{mime_type}"></video></div>'
             )
@@ -2850,6 +2852,14 @@ def _render_html_attachment(
         handle.write(f'<div class="meta file-meta">{html.escape(description)}</div>')
         return
     handle.write(f'<div class="meta">{html.escape(description)}</div>')
+
+
+def _html_video_poster_attr(attachment: Attachment) -> str:
+    """Return a poster attribute for a copied image preview, if available."""
+    preview = attachment.preview_image
+    if preview is None or not preview.exported_path or not preview.is_image():
+        return ""
+    return f' poster="{html.escape(preview.exported_path, quote=True)}"'
 
 
 def _render_html_webpage_preview(handle, attachment: Attachment) -> None:
