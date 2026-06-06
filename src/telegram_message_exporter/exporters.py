@@ -378,6 +378,13 @@ header.header-panel {
   object-fit: cover;
   border-radius: 50%;
 }
+.video-message img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.video-message-preview { cursor: default; }
 .video-message .play-overlay {
   position: absolute;
   inset: 0;
@@ -4209,6 +4216,12 @@ def _render_html_attachment(
                 f'<svg viewBox="0 0 24 24" aria-hidden="true">'
                 f'<path d="M8 5v14l11-7z"/></svg>'
                 f"</button></div>"
+            )
+        elif attachment.kind == "video_message":
+            handle.write(
+                f'<div class="video-message video-message-preview">'
+                f'<img src="{path}" alt="{label}" loading="lazy" '
+                f'decoding="async"{dim_attr}></div>'
             )
         elif attachment.is_image():
             handle.write(
