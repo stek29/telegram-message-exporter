@@ -387,6 +387,11 @@ class TelegramMediaAction:
         self.type = self.Type(raw_type)
         raw.pop("_rawValue", None)
         self.payload = raw
+        aliases = POSTBOX_FIELD_ALIASES.get("TelegramMediaAction", {})
+        for raw_key, value in list(raw.items()):
+            alias = aliases.get(raw_key)
+            if alias and alias != raw_key and alias not in self.payload:
+                self.payload[alias] = value
 
     def __repr__(self) -> str:
         return f"{self.type} {self.payload}"
@@ -2723,8 +2728,20 @@ def attachment_referenced_peer_ids(attachment: Attachment) -> list[int]:
                 "toId",
                 "channelId",
                 "groupId",
+                "senderId",
+                "toPeerId",
+                "boostPeerId",
+                "botId",
             ):
                 _add_int(payload.get(key))
+            pis = payload.get("pis")
+            if isinstance(pis, list):
+                for value in pis:
+                    _add_int(value)
+            part = payload.get("part")
+            if isinstance(part, list):
+                for value in part:
+                    _add_int(value)
     return ids
 
 

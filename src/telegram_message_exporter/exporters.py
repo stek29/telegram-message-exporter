@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import Attachment, ForwardedSegment, Message, PeerInfo, ReplyInfo
-from .postbox import _decode_peer_ids_from_buffer, peer_url
+from .postbox import PostboxObject, _decode_peer_ids_from_buffer, peer_url
 from .hashing import persistent_hash32
 from .schema import ConferenceCallFlags, PhoneCallDiscardReason, TelegramMediaActionType
 from .utils import linkify_html, linkify_markdown, to_local
@@ -1424,7 +1424,7 @@ def _build_action_summary(
     if raw_type == TelegramMediaActionType.JOINED_BY_LINK:
         return _summary_joined_by_link(payload, peer_map, author_id)
     if raw_type == TelegramMediaActionType.MESSAGE_AUTOREMOVE_TIMEOUT_UPDATED:
-        return _summary_autoremove(payload)
+        return _summary_autoremove(payload, peer_map)
     if raw_type == TelegramMediaActionType.PHONE_CALL:
         return _summary_phone_call(payload)
     if raw_type == TelegramMediaActionType.CUSTOM_TEXT:
@@ -1441,6 +1441,108 @@ def _build_action_summary(
         return _summary_joined_by_request(peer_map, author_id)
     if raw_type == TelegramMediaActionType.CONFERENCE_CALL:
         return _summary_conference_call(payload, peer_map)
+    if raw_type == TelegramMediaActionType.PHOTO_UPDATED:
+        return _summary_photo_updated(payload)
+    if raw_type == TelegramMediaActionType.CHANNEL_MIGRATED_FROM_GROUP:
+        return _summary_channel_migrated_from_group(payload)
+    if raw_type == TelegramMediaActionType.GROUP_MIGRATED_TO_CHANNEL:
+        return _summary_group_migrated_to_channel(payload)
+    if raw_type == TelegramMediaActionType.HISTORY_CLEARED:
+        return "Chat history was cleared"
+    if raw_type == TelegramMediaActionType.HISTORY_SCREENSHOT:
+        return "Took a screenshot of the chat history"
+    if raw_type == TelegramMediaActionType.GAME_SCORE:
+        return _summary_game_score(payload)
+    if raw_type == TelegramMediaActionType.PAYMENT_SENT:
+        return _summary_payment_sent(payload)
+    if raw_type == TelegramMediaActionType.BOT_DOMAIN_ACCESS_GRANTED:
+        return _summary_bot_domain_access(payload)
+    if raw_type == TelegramMediaActionType.BOT_SENT_SECURE_VALUES:
+        return _summary_bot_sent_secure_values(payload)
+    if raw_type == TelegramMediaActionType.PHONE_NUMBER_REQUEST:
+        return "Requested the user's phone number"
+    if raw_type == TelegramMediaActionType.GEO_PROXIMITY_REACHED:
+        return _summary_geo_proximity(payload, peer_map, author_id)
+    if raw_type == TelegramMediaActionType.WEB_VIEW_DATA:
+        return "Sent data from a web view"
+    if raw_type == TelegramMediaActionType.GIFT_PREMIUM:
+        return _summary_gift_premium(payload)
+    if raw_type == TelegramMediaActionType.TOPIC_CREATED:
+        return _summary_topic_created(payload)
+    if raw_type == TelegramMediaActionType.TOPIC_EDITED:
+        return _summary_topic_edited(payload)
+    if raw_type == TelegramMediaActionType.SUGGESTED_PROFILE_PHOTO:
+        return "Suggested a profile photo"
+    if raw_type == TelegramMediaActionType.ATTACH_MENU_BOT_ALLOWED:
+        return "Allowed a bot to attach to the menu"
+    if raw_type == TelegramMediaActionType.REQUESTED_PEER:
+        return _summary_requested_peer(payload, peer_map)
+    if raw_type == TelegramMediaActionType.SET_CHAT_WALLPAPER:
+        # TODO(Step 7b): decode the wallpaper PostboxObject (TelegramWallpaper
+        # enum: .builtin/.color/.gradient/.image/.file/.emoticon) and surface
+        # the color / emoticon / image kind. The Postbox field is a JSON-
+        # encoded TelegramWallpaperNativeCodable wrapper; decoding it here
+        # is non-trivial so it's deferred.
+        return "Set a chat wallpaper"
+    if raw_type == TelegramMediaActionType.SET_SAME_CHAT_WALLPAPER:
+        # TODO(Step 7b): same as SET_CHAT_WALLPAPER above.
+        return "Set a chat wallpaper for both sides"
+    if raw_type == TelegramMediaActionType.BOT_APP_ACCESS_GRANTED:
+        return _summary_bot_app_access(payload)
+    if raw_type == TelegramMediaActionType.GIFT_CODE:
+        return _summary_gift_code(payload)
+    if raw_type == TelegramMediaActionType.GIVEAWAY_LAUNCHED:
+        return _summary_giveaway_launched(payload)
+    if raw_type == TelegramMediaActionType.JOINED_CHANNEL:
+        return "Joined the channel"
+    if raw_type == TelegramMediaActionType.GIVEAWAY_RESULTS:
+        return _summary_giveaway_results(payload)
+    if raw_type == TelegramMediaActionType.BOOSTS_APPLIED:
+        return _summary_boosts_applied(payload)
+    if raw_type == TelegramMediaActionType.PAYMENT_REFUNDED:
+        return _summary_payment_refunded(payload, peer_map)
+    if raw_type == TelegramMediaActionType.GIFT_STARS:
+        return _summary_gift_stars(payload)
+    if raw_type == TelegramMediaActionType.PRIZE_STARS:
+        return _summary_prize_stars(payload)
+    if raw_type == TelegramMediaActionType.STAR_GIFT:
+        return _summary_star_gift(payload, peer_map)
+    if raw_type == TelegramMediaActionType.STAR_GIFT_UNIQUE:
+        return _summary_star_gift_unique(payload, peer_map)
+    if raw_type == TelegramMediaActionType.PAID_MESSAGES_REFUNDED:
+        return _summary_paid_messages_refunded(payload)
+    if raw_type == TelegramMediaActionType.PAID_MESSAGES_PRICE_EDITED:
+        return _summary_paid_messages_price_edited(payload)
+    if raw_type == TelegramMediaActionType.TODO_COMPLETIONS:
+        return _summary_todo_completions(payload)
+    if raw_type == TelegramMediaActionType.TODO_APPEND_TASKS:
+        return _summary_todo_append_tasks(payload)
+    if raw_type == TelegramMediaActionType.SUGGESTED_POST_APPROVAL_STATUS:
+        return _summary_suggested_post_approval(payload)
+    if raw_type == TelegramMediaActionType.GIFT_TON:
+        return _summary_gift_ton(payload)
+    if raw_type == TelegramMediaActionType.SUGGESTED_POST_SUCCESS:
+        return _summary_suggested_post_success(payload)
+    if raw_type == TelegramMediaActionType.SUGGESTED_POST_REFUND:
+        return _summary_suggested_post_refund(payload)
+    if raw_type == TelegramMediaActionType.SUGGESTED_BIRTHDAY:
+        return _summary_suggested_birthday(payload)
+    if raw_type == TelegramMediaActionType.STAR_GIFT_PURCHASE_OFFER:
+        return _summary_star_gift_purchase_offer(payload)
+    if raw_type == TelegramMediaActionType.STAR_GIFT_PURCHASE_OFFER_DECLINED:
+        return _summary_star_gift_purchase_offer_declined(payload)
+    if raw_type == TelegramMediaActionType.GROUP_CREATOR_CHANGE:
+        return _summary_group_creator_change(payload, peer_map)
+    if raw_type == TelegramMediaActionType.COPY_PROTECTION_TOGGLE:
+        return _summary_copy_protection_toggle(payload)
+    if raw_type == TelegramMediaActionType.COPY_PROTECTION_REQUEST:
+        return _summary_copy_protection_request(payload)
+    if raw_type == TelegramMediaActionType.MANAGED_BOT_CREATED:
+        return _summary_managed_bot_created(payload, peer_map)
+    if raw_type == TelegramMediaActionType.POLL_OPTION_APPENDED:
+        return _summary_poll_option_appended(payload)
+    if raw_type == TelegramMediaActionType.POLL_OPTION_DELETED:
+        return _summary_poll_option_deleted(payload)
     fallback = metadata.get("summary")
     if isinstance(fallback, str):
         return fallback
@@ -1525,11 +1627,22 @@ def _join_label(
     return _peer_label(author_id, peer_map)
 
 
-def _summary_autoremove(payload: dict) -> str:
+def _summary_autoremove(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]] = None
+) -> str:
     period = payload.get("t")
+    src_raw = payload.get("src")
+    src_id = (
+        int(src_raw)
+        if isinstance(src_raw, int) and not isinstance(src_raw, bool) and src_raw != 0
+        else None
+    )
+    base = "Auto-delete updated"
     if isinstance(period, int) and not isinstance(period, bool):
-        return f"Auto-delete: {_format_autoremove_period(period)}"
-    return "Auto-delete updated"
+        base = f"Auto-delete: {_format_autoremove_period(period)}"
+    if src_id is not None:
+        base += f" (set by {_peer_label(src_id, peer_map)})"
+    return base
 
 
 def _summary_phone_call(payload: dict) -> str:
@@ -1589,9 +1702,12 @@ def _summary_conference_call(
 ) -> str:
     flags = _format_conference_flags(payload.get("flags", 0))
     duration = payload.get("dur")
-    parts: list[str] = ["📹 Conference call"]
+    label = (
+        "Video conference call" if flags.get("is_video") else "Voice conference call"
+    )
+    parts: list[str] = [f"📹 {label}"]
     if flags.get("is_missed"):
-        return "📹 Missed conference call"
+        return f"📹 Missed {label.lower()}"
     if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0:
         parts.append(_format_duration(duration))
     if flags.get("is_active"):
@@ -1600,6 +1716,680 @@ def _summary_conference_call(
     if other:
         parts.append(f"with {_join_peer_names_md(other, peer_map)}")
     return " · ".join(parts)
+
+
+def _summary_photo_updated(payload: dict) -> str:
+    has_image = "image" in payload and payload.get("image") is not None
+    if has_image:
+        return "Updated the chat photo"
+    return "Removed the chat photo"
+
+
+def _summary_channel_migrated_from_group(payload: dict) -> str:
+    title = payload.get("title")
+    if isinstance(title, str) and title:
+        return f"Group was upgraded to a supergroup: {title}"
+    return "Group was upgraded to a supergroup"
+
+
+def _summary_group_migrated_to_channel(payload: dict) -> str:
+    return "Group was upgraded to a channel"
+
+
+def _summary_game_score(payload: dict) -> str:
+    score = payload.get("s")
+    if isinstance(score, int) and not isinstance(score, bool):
+        return f"Scored {score} points in a game"
+    return "Posted a game score"
+
+
+def _summary_payment_sent(payload: dict) -> str:
+    amount = payload.get("ta")
+    currency = payload.get("currency")
+    is_recurring_init = bool(payload.get("isRecurringInit", False))
+    is_recurring_used = bool(payload.get("isRecurringUsed", False))
+    base = "Sent a payment"
+    if (
+        isinstance(amount, int)
+        and not isinstance(amount, bool)
+        and isinstance(currency, str)
+        and currency
+    ):
+        if amount >= 1_000_000_000:
+            base = f"Sent a Stars payment of {amount // 1_000_000_000}✦"
+        else:
+            base = f"Sent a payment of {amount} {currency}"
+    if is_recurring_init:
+        return f"{base} (recurring init)"
+    if is_recurring_used:
+        return f"{base} (recurring)"
+    return base
+
+
+def _summary_bot_domain_access(payload: dict) -> str:
+    domain = payload.get("do")
+    if isinstance(domain, str) and domain:
+        return f"Granted a bot access to {domain}"
+    return "Granted a bot access to a website"
+
+
+def _summary_bot_sent_secure_values(payload: dict) -> str:
+    types = payload.get("ty")
+    if isinstance(types, list) and types:
+        labels: list[str] = []
+        for raw in types:
+            label = _format_secure_value_type(raw)
+            if label:
+                labels.append(label)
+        if labels:
+            return f"Submitted Telegram Passport data: {', '.join(labels)}"
+    return "Submitted Telegram Passport data"
+
+
+def _format_secure_value_type(raw: object) -> Optional[str]:
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        return None
+    from .schema import SentSecureValueType
+
+    try:
+        kind = SentSecureValueType(int(raw))
+    except ValueError:
+        return None
+    return {
+        SentSecureValueType.PERSONAL_DETAILS: "personal details",
+        SentSecureValueType.PASSPORT: "passport",
+        SentSecureValueType.DRIVERS_LICENSE: "driver's license",
+        SentSecureValueType.ID_CARD: "ID card",
+        SentSecureValueType.ADDRESS: "address",
+        SentSecureValueType.BANK_STATEMENT: "bank statement",
+        SentSecureValueType.UTILITY_BILL: "utility bill",
+        SentSecureValueType.RENTAL_AGREEMENT: "rental agreement",
+        SentSecureValueType.PHONE: "phone",
+        SentSecureValueType.EMAIL: "email",
+        SentSecureValueType.INTERNAL_PASSPORT: "internal passport",
+        SentSecureValueType.PASSPORT_REGISTRATION: "passport registration",
+        SentSecureValueType.TEMPORARY_REGISTRATION: "temporary registration",
+    }.get(kind)
+
+
+def _summary_geo_proximity(
+    payload: dict,
+    peer_map: Optional[dict[int, PeerInfo]],
+    author_id: Optional[int],
+) -> str:
+    distance = payload.get("dst")
+    dist_label = (
+        f"{int(distance)} m"
+        if isinstance(distance, int) and not isinstance(distance, bool) and distance > 0
+        else None
+    )
+    from_label = _join_label(peer_map, author_id)
+    to_id_raw = payload.get("toId")
+    to_id = (
+        int(to_id_raw)
+        if isinstance(to_id_raw, int) and not isinstance(to_id_raw, bool)
+        else None
+    )
+    if to_id is not None and to_id != author_id:
+        to_label = _peer_label(to_id, peer_map)
+        base = f"{from_label} is nearby {to_label}"
+    else:
+        base = f"{from_label} is nearby"
+    if dist_label:
+        return f"{base} · {dist_label}"
+    return base
+
+
+def _summary_gift_premium(payload: dict) -> str:
+    months_raw = payload.get("days")
+    months = (
+        int(months_raw) // 30
+        if isinstance(months_raw, int) and not isinstance(months_raw, bool)
+        else 0
+    )
+    if months > 0:
+        return f"Gifted Telegram Premium ({months} months)"
+    return "Gifted Telegram Premium"
+
+
+def _summary_topic_created(payload: dict) -> str:
+    title = payload.get("title")
+    icon_color_raw = payload.get("iconColor")
+    icon_file_id = payload.get("iconFileId")
+    suffix_parts: list[str] = []
+    if (
+        isinstance(icon_color_raw, int)
+        and not isinstance(icon_color_raw, bool)
+        and icon_color_raw >= 0
+    ):
+        suffix_parts.append(f"color {int(icon_color_raw)}")
+    if (
+        isinstance(icon_file_id, int)
+        and not isinstance(icon_file_id, bool)
+        and icon_file_id != 0
+    ):
+        suffix_parts.append(f"icon {int(icon_file_id)}")
+    suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+    if isinstance(title, str) and title:
+        return f"Created forum topic: {title}{suffix}"
+    return f"Created a forum topic{suffix}"
+
+
+def _summary_topic_edited(payload: dict) -> str:
+    components = payload.get("components")
+    if isinstance(components, list) and components:
+        labels: list[str] = []
+        for comp in components:
+            label = _format_topic_component(comp)
+            if label:
+                labels.append(label)
+        if labels:
+            return f"Edited forum topic: {', '.join(labels)}"
+    return "Edited a forum topic"
+
+
+def _format_topic_component(comp: object) -> Optional[str]:
+    if not isinstance(comp, PostboxObject):
+        return None
+    fields = comp.fields
+    type_raw = fields.get("_t")
+    if not isinstance(type_raw, int) or isinstance(type_raw, bool):
+        return None
+    from .schema import ForumTopicEditComponentType
+
+    try:
+        kind = ForumTopicEditComponentType(int(type_raw))
+    except ValueError:
+        return None
+    if kind is ForumTopicEditComponentType.TITLE:
+        new_title = fields.get("title")
+        if isinstance(new_title, str) and new_title:
+            return f"renamed to {new_title}"
+        return "renamed"
+    if kind is ForumTopicEditComponentType.ICON_FILE_ID:
+        return "icon changed"
+    if kind is ForumTopicEditComponentType.IS_CLOSED:
+        opened = not bool(fields.get("isClosed", False))
+        return "reopened" if opened else "closed"
+    if kind is ForumTopicEditComponentType.IS_HIDDEN:
+        shown = not bool(fields.get("isHidden", False))
+        return "shown" if shown else "hidden"
+    return None
+
+
+def _summary_requested_peer(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    button_id_raw = payload.get("b")
+    button_suffix = ""
+    if (
+        isinstance(button_id_raw, int)
+        and not isinstance(button_id_raw, bool)
+        and button_id_raw > 0
+    ):
+        button_suffix = f" (button {int(button_id_raw)})"
+    pis = payload.get("pis")
+    if isinstance(pis, list) and pis:
+        names = _join_peer_names_md(
+            [int(x) for x in pis if isinstance(x, int) and not isinstance(x, bool)],
+            peer_map,
+        )
+        if names:
+            return f"Shared {names}{button_suffix}"
+        return f"Shared {len(pis)} peer(s){button_suffix}"
+    single = payload.get("pi")
+    if isinstance(single, int) and not isinstance(single, bool) and single != 0:
+        return f"Shared {_peer_label(int(single), peer_map)}{button_suffix}"
+    return f"Shared a peer{button_suffix}"
+
+
+def _summary_bot_app_access(payload: dict) -> str:
+    app = payload.get("app")
+    type_raw = payload.get("atp")
+    type_label = _format_bot_app_access_type(type_raw)
+    if isinstance(app, str) and app:
+        if type_label:
+            return f"Granted {app} {type_label} access"
+        return f"Granted {app} access"
+    if type_label:
+        return f"Granted a bot {type_label} access"
+    return "Granted a bot app access"
+
+
+def _format_bot_app_access_type(raw: object) -> Optional[str]:
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        return None
+    from .schema import BotSendMessageAccessGrantedType
+
+    try:
+        kind = BotSendMessageAccessGrantedType(int(raw))
+    except ValueError:
+        return None
+    return {
+        BotSendMessageAccessGrantedType.ATTACH_MENU: "attach-menu",
+        BotSendMessageAccessGrantedType.REQUEST: "request",
+    }.get(kind)
+
+
+def _summary_gift_code(payload: dict) -> str:
+    months = payload.get("months")
+    if isinstance(months, int) and not isinstance(months, bool) and months > 0:
+        unclaimed = bool(payload.get("unclaimed", False))
+        if unclaimed:
+            return f"Posted an unclaimed Premium gift code ({months} months)"
+        return f"Gifted Telegram Premium ({months} months)"
+    return "Posted a gift code"
+
+
+def _summary_giveaway_launched(payload: dict) -> str:
+    stars = payload.get("stars")
+    if isinstance(stars, int) and not isinstance(stars, bool) and stars > 0:
+        return f"Launched a giveaway ({stars} Stars)"
+    return "Launched a giveaway"
+
+
+def _summary_giveaway_results(payload: dict) -> str:
+    winners = payload.get("winners")
+    unclaimed = payload.get("unclaimed")
+    is_stars = bool(payload.get("stars", False))
+    prize = "Stars" if is_stars else "Premium subscriptions"
+    parts: list[str] = []
+    if isinstance(winners, int) and not isinstance(winners, bool) and winners > 0:
+        parts.append(f"{winners} winner(s)")
+    if isinstance(unclaimed, int) and not isinstance(unclaimed, bool) and unclaimed > 0:
+        parts.append(f"{unclaimed} unclaimed")
+    suffix = f" ({', '.join(parts)})" if parts else ""
+    return f"Giveaway ended: {prize}{suffix}"
+
+
+def _summary_boosts_applied(payload: dict) -> str:
+    boosts = payload.get("boosts")
+    if isinstance(boosts, int) and not isinstance(boosts, bool) and boosts > 0:
+        return f"Applied {boosts} boost(s)"
+    return "Applied boosts"
+
+
+def _summary_payment_refunded(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]] = None
+) -> str:
+    amount = payload.get("amount")
+    currency = payload.get("currency")
+    peer_id_raw = payload.get("pi")
+    peer_id = (
+        int(peer_id_raw)
+        if isinstance(peer_id_raw, int) and not isinstance(peer_id_raw, bool)
+        else None
+    )
+    if (
+        isinstance(amount, int)
+        and not isinstance(amount, bool)
+        and isinstance(currency, str)
+        and currency
+    ):
+        base = f"Refunded a payment of {amount} {currency}"
+        if peer_id is not None:
+            base += f" to {_peer_label(peer_id, peer_map)}"
+        return base
+    if peer_id is not None:
+        return f"Refunded a payment to {_peer_label(peer_id, peer_map)}"
+    return "Refunded a payment"
+
+
+def _summary_gift_stars(payload: dict) -> str:
+    count = payload.get("count")
+    amount = payload.get("amount")
+    currency = payload.get("currency")
+    if (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and count > 0
+        and isinstance(amount, int)
+        and not isinstance(amount, bool)
+        and isinstance(currency, str)
+        and currency
+        and currency != "XTR"
+    ):
+        if amount >= 1_000_000_000:
+            return f"Gifted {count} stars for {amount // 1_000_000_000}✦"
+        return f"Gifted {count} stars for {amount} {currency}"
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        return f"Gifted {count} Stars"
+    return "Gifted Stars"
+
+
+def _summary_prize_stars(payload: dict) -> str:
+    amount = payload.get("amount")
+    unclaimed = bool(payload.get("unclaimed", False))
+    if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
+        if unclaimed:
+            return f"Won a Stars prize of {amount} (unclaimed)"
+        return f"Won a Stars prize of {amount}"
+    if unclaimed:
+        return "Won an unclaimed Stars prize"
+    return "Won a Stars prize"
+
+
+def _summary_star_gift(payload: dict, peer_map: Optional[dict[int, PeerInfo]]) -> str:
+    title = _star_gift_title(payload.get("gift"))
+    sender = _peer_label_for_id(payload.get("senderId"), peer_map)
+    recipient = _peer_label_for_id(payload.get("peerId"), peer_map)
+    if title and sender and recipient:
+        return f"{sender} sent a star gift to {recipient}"
+    if title:
+        return "Sent a star gift"
+    return "Sent a star gift"
+
+
+def _summary_star_gift_unique(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    title = _star_gift_title(payload.get("gift"))
+    if title:
+        return f"Sent a unique star gift: {title}"
+    return "Sent a unique star gift"
+
+
+def _summary_paid_messages_refunded(payload: dict) -> str:
+    count = payload.get("count")
+    stars = payload.get("stars")
+    if (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and isinstance(stars, int)
+        and not isinstance(stars, bool)
+    ):
+        return f"Refunded {stars} Stars for {count} paid message(s)"
+    return "Refunded paid messages"
+
+
+def _summary_paid_messages_price_edited(payload: dict) -> str:
+    stars = payload.get("stars")
+    broadcast = bool(payload.get("brmsg", False))
+    if isinstance(stars, int) and not isinstance(stars, bool):
+        if broadcast:
+            return f"Edited the paid message price to {stars} Stars (broadcast allowed)"
+        return f"Edited the paid message price to {stars} Stars"
+    return "Edited the paid message price"
+
+
+def _summary_todo_completions(payload: dict) -> str:
+    completed = payload.get("completed") or []
+    incompleted = payload.get("incompleted") or []
+    parts: list[str] = []
+    if isinstance(completed, list) and completed:
+        parts.append(f"completed {len(completed)}")
+    if isinstance(incompleted, list) and incompleted:
+        parts.append(f"uncompleted {len(incompleted)}")
+    if parts:
+        return f"Updated the todo list ({', '.join(parts)})"
+    return "Updated the todo list"
+
+
+def _summary_todo_append_tasks(payload: dict) -> str:
+    """Render a ``TODO_APPEND_TASKS`` action with the appended task texts.
+
+    Each task is a ``TelegramMediaTodo.Item`` PostboxObject; the ``text``
+    field carries the human-readable task label. When at least one task
+    has a non-empty text we surface them as ``"Added todo items: a, b, c"``.
+    """
+    tasks = payload.get("tasks")
+    labels: list[str] = []
+    if isinstance(tasks, list):
+        for task in tasks:
+            if not isinstance(task, PostboxObject):
+                continue
+            text = task.fields.get("text")
+            if isinstance(text, str) and text:
+                labels.append(text)
+    if labels:
+        return f"Added todo items: {', '.join(labels)}"
+    count = len(tasks) if isinstance(tasks, list) else 0
+    if count:
+        return f"Added {count} todo item(s)"
+    return "Updated the todo list"
+
+
+def _summary_suggested_post_approval(payload: dict) -> str:
+    status = payload.get("st")
+    if not isinstance(status, PostboxObject):
+        return "Updated the suggested post status"
+    fields = status.fields
+    type_raw = fields.get("_t")
+    if not isinstance(type_raw, int) or isinstance(type_raw, bool):
+        return "Updated the suggested post status"
+    from .schema import SuggestedPostApprovalStatusType
+
+    try:
+        kind = SuggestedPostApprovalStatusType(int(type_raw))
+    except ValueError:
+        return "Updated the suggested post status"
+    if kind is SuggestedPostApprovalStatusType.APPROVED:
+        return "Approved the suggested post"
+    return "Rejected the suggested post"
+
+
+def _summary_gift_ton(payload: dict) -> str:
+    amount = payload.get("amount")
+    currency = payload.get("currency")
+    if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
+        if isinstance(currency, str) and currency == "XTR":
+            return f"Gifted {amount} Stars"
+        if isinstance(currency, str) and currency and currency != "TON":
+            return f"Gifted {amount} {currency}"
+        return f"Gifted {amount} TON"
+    return "Gifted TON"
+
+
+def _summary_suggested_post_success(payload: dict) -> str:
+    amount = payload.get("amt")
+    if isinstance(amount, PostboxObject):
+        amount_label = _format_currency_amount(amount)
+        if amount_label:
+            return f"Suggested post was published (earned {amount_label})"
+    return "Suggested post was published"
+
+
+def _summary_suggested_post_refund(payload: dict) -> str:
+    status = payload.get("s")
+    if isinstance(status, PostboxObject):
+        user_initiated = bool(status.fields.get("iui", False))
+        if user_initiated:
+            return "Refunded the suggested post (user-initiated)"
+    return "Refunded the suggested post"
+
+
+def _summary_suggested_birthday(payload: dict) -> str:
+    birthday = payload.get("birthday")
+    if isinstance(birthday, PostboxObject):
+        fields = birthday.fields
+        day = fields.get("day")
+        month = fields.get("month")
+        year = fields.get("year")
+        if (
+            isinstance(day, int)
+            and not isinstance(day, bool)
+            and isinstance(month, int)
+            and not isinstance(month, bool)
+        ):
+            year_str = ""
+            if (
+                isinstance(year, int)
+                and not isinstance(year, bool)
+                and 1900 <= int(year) <= 2100
+            ):
+                year_str = f" {int(year)}"
+            return (
+                f"Set a suggested birthday ({_format_birthday(day, month)}{year_str})"
+            )
+    return "Set a suggested birthday"
+
+
+def _format_birthday(day: int, month: int) -> str:
+    months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
+    if 1 <= month <= 12:
+        return f"{months[month - 1]} {day}"
+    return f"{month}/{day}"
+
+
+def _summary_star_gift_purchase_offer(payload: dict) -> str:
+    title = _star_gift_title(payload.get("gift"))
+    is_accepted = bool(payload.get("isAccepted", False))
+    is_declined = bool(payload.get("isDeclined", False))
+    if is_accepted:
+        verb = "accepted"
+    elif is_declined:
+        verb = "declined"
+    else:
+        verb = "received"
+    amount = payload.get("amount")
+    amount_label = ""
+    if isinstance(amount, PostboxObject):
+        amount_label = _format_currency_amount(amount)
+    suffix = f" for {amount_label}" if amount_label else ""
+    if title:
+        return f"Star-gift {verb}: {title}{suffix}"
+    return f"Star-gift {verb}{suffix}"
+
+
+def _format_currency_amount(amount_obj: PostboxObject) -> str:
+    """Render a ``CurrencyAmount`` PostboxObject as ``"<N> <label>"``.
+
+    ``CurrencyAmount`` encodes ``amount`` as ``a`` and ``currency`` as ``c``
+    (Telegram-side Postbox key codes). For Stars (currency 0) the value is
+    divided by ``1_000_000_000`` and rendered as ``N✦``; for fiat/TON the
+    raw integer and a short label are used. Returns ``""`` for empty/zero
+    amounts so callers can skip the suffix.
+    """
+    fields = amount_obj.fields
+    raw = fields.get("a")
+    currency = fields.get("c")
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        return ""
+    if not isinstance(currency, int) or isinstance(currency, bool):
+        return str(int(raw))
+    if raw <= 0:
+        return ""
+    if currency == 0:
+        return f"{int(raw) // 1_000_000_000}✦"
+    return f"{int(raw)} crn{int(currency)}"
+
+
+def _summary_star_gift_purchase_offer_declined(payload: dict) -> str:
+    has_expired = bool(payload.get("hasExpired", False))
+    title = _star_gift_title(payload.get("gift"))
+    amount = payload.get("amount")
+    amount_label = ""
+    if isinstance(amount, PostboxObject):
+        amount_label = _format_currency_amount(amount)
+    subject = title or "a star-gift"
+    if has_expired and amount_label:
+        return f"Declined an expired offer for {subject} ({amount_label})"
+    if has_expired:
+        return f"Declined an expired offer for {subject}"
+    if amount_label:
+        return f"Declined the offer for {subject} ({amount_label})"
+    return f"Declined the offer for {subject}"
+
+
+def _summary_group_creator_change(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    change = payload.get("d")
+    if isinstance(change, PostboxObject):
+        fields = change.fields
+        kind_raw = fields.get("k")
+        target_raw = fields.get("t")
+        if isinstance(target_raw, int) and not isinstance(target_raw, bool):
+            target = _peer_label(int(target_raw), peer_map)
+        else:
+            target = None
+        from .schema import GroupCreatorChangeKind
+
+        try:
+            kind_enum = GroupCreatorChangeKind(int(kind_raw))
+        except (TypeError, ValueError):
+            kind_enum = None
+        if kind_enum is GroupCreatorChangeKind.PENDING:
+            return f"Pending: ownership transfer to {target or 'another member'}"
+        if kind_enum is GroupCreatorChangeKind.APPLIED:
+            return f"Transferred ownership to {target or 'another member'}"
+    return "Group creator changed"
+
+
+def _summary_copy_protection_toggle(payload: dict) -> str:
+    new_value = bool(payload.get("newValue", False))
+    if new_value:
+        return "Enabled copy protection for media"
+    return "Disabled copy protection for media"
+
+
+def _summary_copy_protection_request(payload: dict) -> str:
+    has_expired = bool(payload.get("hasExpired", False))
+    if has_expired:
+        return "Copy-protection request expired"
+    new_value = bool(payload.get("newValue", False))
+    if new_value:
+        return "Enabled copy protection for media"
+    return "Disabled copy protection for media"
+
+
+def _summary_managed_bot_created(
+    payload: dict, peer_map: Optional[dict[int, PeerInfo]]
+) -> str:
+    bot_id = payload.get("botId")
+    if isinstance(bot_id, int) and not isinstance(bot_id, bool):
+        return f"Created the managed bot {_peer_label(int(bot_id), peer_map)}"
+    return "Created a managed bot"
+
+
+def _summary_poll_option_appended(payload: dict) -> str:
+    option = payload.get("option")
+    if isinstance(option, PostboxObject):
+        text = option.fields.get("text")
+        if isinstance(text, str) and text:
+            return f"Added a poll option: {text}"
+    return "Added a poll option"
+
+
+def _summary_poll_option_deleted(payload: dict) -> str:
+    option = payload.get("option")
+    if isinstance(option, PostboxObject):
+        text = option.fields.get("text")
+        if isinstance(text, str) and text:
+            return f"Removed a poll option: {text}"
+    return "Removed a poll option"
+
+
+def _peer_label_for_id(
+    value: object, peer_map: Optional[dict[int, PeerInfo]]
+) -> Optional[str]:
+    if isinstance(value, int) and not isinstance(value, bool) and value != 0:
+        return _peer_label(int(value), peer_map)
+    return None
+
+
+def _star_gift_title(gift_obj: object) -> Optional[str]:
+    if not isinstance(gift_obj, PostboxObject):
+        return None
+    value = gift_obj.fields.get("value")
+    if isinstance(value, PostboxObject):
+        title = value.fields.get("title")
+        if isinstance(title, str) and title:
+            return title
+    return None
 
 
 def _render_html_service_message(
