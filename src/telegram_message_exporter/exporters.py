@@ -420,6 +420,43 @@ a:hover { text-decoration: underline; }
   font-size: 12px;
   color: #bbf7d0;
 }
+.link-preview {
+  margin: 6px 0 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--glass-border);
+  max-width: 520px;
+}
+.link-preview-site {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.link-preview-title {
+  display: block;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.link-preview-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.link-preview-desc {
+  font-size: 13px;
+  color: var(--ink);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.link-preview img, .link-preview video { max-width: 100%; height: auto; border-radius: 6px; margin-top: 6px; display: block; }
 """
 
 
@@ -452,6 +489,63 @@ class RenderOptions:
     tz: Optional[object] = None
 
 
+def _copy_single_attachment(
+    attachment: Attachment,
+    media_dir: Path,
+    target_dir: Path,
+    copied_keys: set[str],
+) -> tuple[Attachment, int]:
+    """Copy a single attachment's file into ``target_dir`` and return a replaced copy.
+
+    The returned attachment has ``selected_cache_key`` and ``exported_path``
+    set. ``copied_count`` is incremented when a new file is written.
+    """
+    cache_keys = tuple(
+        key
+        for key in (
+            attachment.cache_key,
+            *attachment.alternate_cache_keys,
+        )
+        if key
+    )
+    direct_source = (
+        Path(attachment.source_path).expanduser() if attachment.source_path else None
+    )
+    if not cache_keys and (direct_source is None or not direct_source.is_file()):
+        return attachment, 0
+    selected_key = next(
+        (key for key in cache_keys if (media_dir / key).is_file()),
+        None,
+    )
+    if selected_key is not None:
+        source = media_dir / selected_key
+        target_name = selected_key
+    elif direct_source is not None and direct_source.is_file():
+        source = direct_source
+        target_name = attachment.cache_key or direct_source.name or "local-attachment"
+    else:
+        return attachment, 0
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / target_name
+    copied_count = 0
+    if target_name not in copied_keys:
+        shutil.copy2(source, target)
+        copied_keys.add(target_name)
+        copied_count = 1
+    return (
+        replace(
+            attachment,
+            selected_cache_key=(
+                selected_key
+                if selected_key is not None
+                else attachment.selected_cache_key
+            ),
+            exported_path=(Path(target_dir.name) / target_name).as_posix(),
+        ),
+        copied_count,
+    )
+
+
 def copy_message_media(
     messages: list[Message],
     media_dir: Path,
@@ -465,56 +559,39 @@ def copy_message_media(
     for message in messages:
         updated_attachments: list[Attachment] = []
         for attachment in message.attachments:
-            cache_keys = tuple(
-                key
-                for key in (
-                    attachment.cache_key,
-                    *attachment.alternate_cache_keys,
-                )
-                if key
+            copied_attachment, added = _copy_single_attachment(
+                attachment, media_dir, target_dir, copied_keys
             )
-            direct_source = (
-                Path(attachment.source_path).expanduser()
-                if attachment.source_path
-                else None
-            )
-            if not cache_keys and (
-                direct_source is None or not direct_source.is_file()
+            copied_count += added
+            if (
+                copied_attachment is attachment
+                and attachment.preview_image is None
+                and attachment.preview_video is None
             ):
                 updated_attachments.append(attachment)
                 continue
-            selected_key = next(
-                (key for key in cache_keys if (media_dir / key).is_file()),
-                None,
-            )
-            if selected_key is not None:
-                source = media_dir / selected_key
-                target_name = selected_key
-            elif direct_source is not None and direct_source.is_file():
-                source = direct_source
-                target_name = (
-                    attachment.cache_key or direct_source.name or "local-attachment"
+            nested_replaced: Optional[Attachment] = copied_attachment
+            if nested_replaced.preview_image is not None:
+                new_image, img_added = _copy_single_attachment(
+                    nested_replaced.preview_image,
+                    media_dir,
+                    target_dir,
+                    copied_keys,
                 )
-            else:
-                updated_attachments.append(attachment)
-                continue
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target = target_dir / target_name
-            if target_name not in copied_keys:
-                shutil.copy2(source, target)
-                copied_keys.add(target_name)
-                copied_count += 1
-            updated_attachments.append(
-                replace(
-                    attachment,
-                    selected_cache_key=(
-                        selected_key
-                        if selected_key is not None
-                        else attachment.selected_cache_key
-                    ),
-                    exported_path=(Path(target_dir.name) / target_name).as_posix(),
+                copied_count += img_added
+                if new_image is not nested_replaced.preview_image:
+                    nested_replaced = replace(nested_replaced, preview_image=new_image)
+            if nested_replaced.preview_video is not None:
+                new_video, vid_added = _copy_single_attachment(
+                    nested_replaced.preview_video,
+                    media_dir,
+                    target_dir,
+                    copied_keys,
                 )
-            )
+                copied_count += vid_added
+                if new_video is not nested_replaced.preview_video:
+                    nested_replaced = replace(nested_replaced, preview_video=new_video)
+            updated_attachments.append(nested_replaced)
         updated_messages.append(
             replace(message, attachments=tuple(updated_attachments))
         )
@@ -716,10 +793,22 @@ def _human_size(n: int) -> str:
     return f"{int(value)} TB"
 
 
+def _format_duration(seconds: int) -> str:
+    """Format a duration in seconds as ``M:SS`` or ``H:MM:SS`` (no leading-zero hours)."""
+    total = max(int(seconds), 0)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 def _render_markdown_attachment(
     attachment: Attachment,
     peer_map: Optional[dict[int, PeerInfo]] = None,
 ) -> str:
+    if attachment.kind == "webpage" and attachment.metadata:
+        return _render_markdown_webpage_preview(attachment)
     label = _attachment_label(attachment)
     if attachment.url:
         return f"[{label}]({attachment.url})"
@@ -732,6 +821,44 @@ def _render_markdown_attachment(
     if attachment.kind == "poll" and attachment.metadata:
         return _render_markdown_poll(attachment.metadata, peer_map)
     return f"`[{_attachment_description(attachment)}]`"
+
+
+def _render_markdown_webpage_preview(attachment: Attachment) -> str:
+    """Render a loaded-content webpage as a Markdown link-preview block."""
+    metadata = attachment.metadata or {}
+    url = attachment.url or ""
+    title = metadata.get("title") or metadata.get("display_url") or url
+
+    parts: list[str] = []
+    site_name = metadata.get("site_name")
+    if site_name:
+        parts.append(f"**{site_name} — {title}** ([link]({url}))")
+    else:
+        parts.append(f"**{title}** ([link]({url}))")
+
+    author = metadata.get("author")
+    duration = metadata.get("duration")
+    if author or isinstance(duration, int):
+        meta_bits: list[str] = []
+        if author:
+            meta_bits.append(str(author))
+        if isinstance(duration, int):
+            meta_bits.append(_format_duration(duration))
+        parts.append(f"*{' · '.join(meta_bits)}*")
+
+    description = metadata.get("description")
+    if description:
+        parts.append(f"> {description}")
+
+    preview_image = attachment.preview_image
+    if preview_image is not None and preview_image.exported_path:
+        parts.append(f"![{title}]({preview_image.exported_path})")
+    preview_video = attachment.preview_video
+    if preview_video is not None and preview_video.exported_path:
+        video_label = preview_video.filename or "Video"
+        parts.append(f"[▶ {video_label}]({preview_video.exported_path})")
+
+    return "\n".join(parts)
 
 
 def _peer_names(
@@ -1291,6 +1418,9 @@ def _render_html_attachment(
     attachment: Attachment,
     peer_map: Optional[dict[int, PeerInfo]] = None,
 ) -> None:
+    if attachment.kind == "webpage" and attachment.metadata:
+        _render_html_webpage_preview(handle, attachment)
+        return
     if attachment.kind == "poll" and attachment.metadata:
         _render_html_poll(handle, attachment.metadata, peer_map)
         return
@@ -1349,6 +1479,96 @@ def _render_html_attachment(
         handle.write(f'<div class="meta file-meta">{html.escape(description)}</div>')
         return
     handle.write(f'<div class="meta">{html.escape(description)}</div>')
+
+
+def _render_html_webpage_preview(handle, attachment: Attachment) -> None:
+    """Render a loaded-content webpage as an HTML link-preview card."""
+    metadata = attachment.metadata or {}
+    url = html.escape(attachment.url or "", quote=True)
+    raw_title = (
+        metadata.get("title") or metadata.get("display_url") or attachment.url or ""
+    )
+    title = html.escape(str(raw_title))
+
+    handle.write('<div class="link-preview">')
+
+    site_name = metadata.get("site_name")
+    if isinstance(site_name, str) and site_name:
+        handle.write(f'<div class="link-preview-site">{html.escape(site_name)}</div>')
+
+    handle.write(f'<a class="link-preview-title" href="{url}">{title}</a>')
+
+    author = metadata.get("author")
+    duration = metadata.get("duration")
+    if isinstance(author, str) and author:
+        author_html = html.escape(author)
+    else:
+        author_html = None
+    duration_html = (
+        html.escape(_format_duration(int(duration)))
+        if isinstance(duration, int) and not isinstance(duration, bool)
+        else None
+    )
+    if author_html is not None or duration_html is not None:
+        sep = " · " if author_html is not None and duration_html is not None else ""
+        meta_text = (author_html or "") + sep + (duration_html or "")
+        handle.write(f'<div class="link-preview-meta">{meta_text}</div>')
+
+    description = metadata.get("description")
+    if isinstance(description, str) and description:
+        handle.write(f'<div class="link-preview-desc">{html.escape(description)}</div>')
+
+    preview_image = attachment.preview_image
+    if preview_image is not None and preview_image.exported_path:
+        img_path = html.escape(preview_image.exported_path, quote=True)
+        img_label = html.escape(
+            preview_image.filename or str(raw_title) or "preview image"
+        )
+        dim_attr = ""
+        if (
+            isinstance(preview_image.width, int)
+            and isinstance(preview_image.height, int)
+            and preview_image.width > 0
+            and preview_image.height > 0
+        ):
+            dim_attr = f' width="{preview_image.width}" height="{preview_image.height}"'
+        handle.write(
+            f'<img src="{img_path}" alt="{img_label}" loading="lazy" '
+            f'decoding="async"{dim_attr}>'
+        )
+        handle.write(
+            f'<div class="meta file-meta">'
+            f"{html.escape(_attachment_description(preview_image))}</div>"
+        )
+
+    preview_video = attachment.preview_video
+    if preview_video is not None and preview_video.exported_path:
+        vid_path = html.escape(preview_video.exported_path, quote=True)
+        vid_mime = html.escape(preview_video.mime_type or "", quote=True)
+        dim_attr = ""
+        if (
+            isinstance(preview_video.width, int)
+            and isinstance(preview_video.height, int)
+            and preview_video.width > 0
+            and preview_video.height > 0
+        ):
+            dim_attr = f' width="{preview_video.width}" height="{preview_video.height}"'
+        if preview_video.kind == "video_message":
+            handle.write(
+                f'<video preload="metadata" playsinline loop{dim_attr}>'
+                f'<source src="{vid_path}" type="{vid_mime}"></video>'
+            )
+        else:
+            handle.write(
+                f'<video controls preload="none"{dim_attr}>'
+                f'<source src="{vid_path}" type="{vid_mime}"></video>'
+            )
+        handle.write(
+            f'<div class="meta file-meta">'
+            f"{html.escape(_attachment_description(preview_video))}</div>"
+        )
+
+    handle.write("</div>")
 
 
 def _back_to_top_script() -> str:

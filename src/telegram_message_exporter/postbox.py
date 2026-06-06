@@ -646,6 +646,99 @@ def _file_resource_keys(
     return keys[0], tuple(keys[1:]), source_path
 
 
+def _webpage_attachments(media: PostboxObject) -> list[Attachment]:
+    """Build attachments for a ``TelegramMediaWebpage`` media object.
+
+    Loaded-content fields are flat-inlined into the parent payload
+    (per ``TelegramMediaWebpage.encode`` in the iOS source — when
+    ``content`` is ``.Loaded``, every key of
+    ``TelegramMediaWebpageLoadedContent`` is written into the same
+    encoder as the parent). Pending pages have only ``pendingDate`` /
+    ``pendingUrl``.
+    """
+    payload = media.payload
+    fields = media.fields
+
+    image_obj = fields.get("image")
+    file_obj = fields.get("file")
+    has_image = isinstance(image_obj, PostboxObject)
+    has_file = isinstance(file_obj, PostboxObject)
+    title = _maybe_str(fields.get("title"))
+    description = _maybe_str(fields.get("text"))
+
+    canonical_url = _maybe_str(fields.get("url")) or _maybe_str(
+        fields.get("pending_url")
+    )
+
+    if not (title or description or has_image or has_file):
+        if canonical_url is None:
+            return []
+        return [Attachment(kind="webpage", url=canonical_url)]
+
+    metadata: dict[str, Any] = {}
+    site_name = _maybe_str(fields.get("website_name"))
+    if site_name is not None:
+        metadata["site_name"] = site_name
+    if title is not None:
+        metadata["title"] = title
+    if description is not None:
+        metadata["description"] = description
+    author = _maybe_str(fields.get("author"))
+    if author is not None:
+        metadata["author"] = author
+    raw_duration = fields.get("duration")
+    if (
+        isinstance(raw_duration, int)
+        and not isinstance(raw_duration, bool)
+        and raw_duration >= 0
+    ):
+        metadata["duration"] = int(raw_duration)
+    raw_content_type = payload.get("ty")
+    if isinstance(raw_content_type, str) and raw_content_type:
+        metadata["content_type"] = raw_content_type
+    display_url = _maybe_str(fields.get("display_url"))
+    if display_url is not None:
+        metadata["display_url"] = display_url
+    embed_url = _maybe_str(fields.get("embed_url"))
+    if embed_url is not None:
+        metadata["embed_url"] = embed_url
+    embed_type = _maybe_str(fields.get("embed_type"))
+    if embed_type is not None:
+        metadata["embed_type"] = embed_type
+    raw_ew = fields.get("embed_width")
+    raw_eh = fields.get("embed_height")
+    if (
+        isinstance(raw_ew, int)
+        and not isinstance(raw_ew, bool)
+        and isinstance(raw_eh, int)
+        and not isinstance(raw_eh, bool)
+    ):
+        metadata["embed_width"] = int(raw_ew)
+        metadata["embed_height"] = int(raw_eh)
+    if "ipd" in payload or "ip" in payload:
+        metadata["has_instant_page"] = True
+
+    preview_image: Optional[Attachment] = None
+    if has_image:
+        image_attachments = media_attachments(image_obj)
+        if image_attachments:
+            preview_image = image_attachments[0]
+    preview_video: Optional[Attachment] = None
+    if has_file:
+        file_attachments = media_attachments(file_obj)
+        if file_attachments:
+            preview_video = file_attachments[0]
+    return [
+        Attachment(
+            kind="webpage",
+            url=canonical_url,
+            metadata=metadata,
+            preview_image=preview_image,
+            preview_video=preview_video,
+        )
+    ]
+
+
 def media_attachments(media: Any) -> list[Attachment]:
     """Convert a decoded Postbox media object to export attachments."""
     if isinstance(media, TelegramMediaAction):
@@ -734,19 +827,38 @@ def media_attachments(media: Any) -> list[Attachment]:
                 key = _resource_cache_key(video_representation.fields.get("resource"))
                 if key and key not in cache_keys:
                     cache_keys.append(key)
+        # The iOS TelegramMediaImageRepresentation and CloudPhotoSizeMediaResource
+        # do not persist a mime type in the database — the server infers it on
+        # upload. Assume JPEG for photos rendered through this path.
+        largest_resource = representation_fields.get("resource")
+        largest_resource_fields = (
+            largest_resource.fields
+            if isinstance(largest_resource, PostboxObject)
+            else {}
+        )
+        raw_resource_size = largest_resource_fields.get("size")
+        if (
+            isinstance(raw_resource_size, int)
+            and not isinstance(raw_resource_size, bool)
+            and raw_resource_size >= 0
+        ):
+            image_size: Optional[int] = int(raw_resource_size)
+        else:
+            image_size = None
         return [
             Attachment(
                 kind="image",
+                mime_type="image/jpeg",
                 cache_key=cache_keys[0] if cache_keys else None,
                 alternate_cache_keys=tuple(cache_keys[1:]),
                 width=representation_fields.get("width"),
                 height=representation_fields.get("height"),
+                size=image_size,
             )
         ]
 
     if media.type_name == "TelegramMediaWebpage":
-        url = fields.get("url") or fields.get("pending_url")
-        return [Attachment(kind="webpage", url=url)] if url else []
+        return _webpage_attachments(media)
 
     if media.type_name == "TelegramMediaPoll":
         metadata = _extract_poll_metadata(fields)

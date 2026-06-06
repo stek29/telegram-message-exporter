@@ -26,6 +26,8 @@ class Attachment:
     sticker_emoji: Optional[str] = None
     url: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
+    preview_image: Optional["Attachment"] = None
+    preview_video: Optional["Attachment"] = None
 
 
 @dataclass(frozen=True)
