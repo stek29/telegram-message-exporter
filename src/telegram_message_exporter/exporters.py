@@ -5,13 +5,15 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .models import Attachment, Message
+from .models import Attachment, ForwardedSegment, Message, PeerInfo
+from .postbox import peer_url
 from .utils import linkify_html, linkify_markdown, to_local
 
 HTML_BOOTSTRAP = (
@@ -307,7 +309,7 @@ class HtmlStats:
 class RenderOptions:
     """Optional rendering preferences."""
 
-    peer_map: Optional[dict[int, str]] = None
+    peer_map: Optional[dict[int, PeerInfo]] = None
     show_direction: bool = False
     tz: Optional[object] = None
 
@@ -376,73 +378,150 @@ def copy_message_media(
     return updated_messages, copied_count
 
 
-def resolve_speaker(msg: Message, peer_map: Optional[dict[int, str]]) -> str:
+def resolve_speaker(msg: Message, peer_map: Optional[dict[int, PeerInfo]]) -> str:
     """Resolve display name for a message."""
     if peer_map:
         if msg.author_id and msg.author_id in peer_map:
-            return peer_map[msg.author_id]
+            return peer_map[msg.author_id].name
         if msg.outgoing is not True and msg.peer_id and msg.peer_id in peer_map:
-            return peer_map[msg.peer_id]
+            return peer_map[msg.peer_id].name
     return "Unknown"
+
+
+def _speaker_url(
+    msg: Message, peer_map: Optional[dict[int, PeerInfo]]
+) -> Optional[str]:
+    """Return a t.me URL for a message's speaker, if the peer is linkable."""
+    if not peer_map:
+        return None
+    if msg.author_id is not None and msg.author_id in peer_map:
+        return peer_url(peer_map[msg.author_id], msg.author_id)
+    if msg.outgoing is not True and msg.peer_id and msg.peer_id in peer_map:
+        return peer_url(peer_map[msg.peer_id], msg.peer_id)
+    return None
 
 
 def _resolve_peer_name(
     peer_id: Optional[int],
-    peer_map: Optional[dict[int, str]],
+    peer_map: Optional[dict[int, PeerInfo]],
 ) -> Optional[str]:
     if peer_id is None or not peer_map:
         return None
-    return peer_map.get(peer_id)
+    info = peer_map.get(peer_id)
+    return info.name if info is not None else None
 
 
-def _forwarded_from_parts(
-    msg: Message,
-    peer_map: Optional[dict[int, str]],
-    tz: Optional[object] = None,
-) -> list[tuple[str, object]]:
-    """Return forwarded-info as a list of (kind, value) fragments.
+def _html_link(text: str, url: Optional[str]) -> str:
+    """Render ``text`` as an ``<a>`` tag when ``url`` is set, else HTML-escaped text."""
+    if url is None:
+        return html.escape(text)
+    safe_text = html.escape(text)
+    safe_url = html.escape(url, quote=True)
+    return f'<a href="{safe_url}" target="_blank" rel="noopener">{safe_text}</a>'
 
-    kind is "text" (plain text) or "time" (value is the original UTC datetime).
+
+def _md_link(text: str, url: Optional[str]) -> str:
+    """Render ``text`` as a Markdown link when ``url`` is set, else plain text."""
+    if url is None:
+        return text
+    return f"[{text}]({url})"
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+def _render_forwarded_segment_html(handle, seg: ForwardedSegment) -> None:
+    """Write one forwarded-line segment to ``handle``, preserving JS-side date localization.
+
+    Date segments are wrapped in a ``<time>`` element so the page's JS can
+    localize the text to the viewer's browser timezone. The ``<a>`` wraps
+    the ``<time>`` (not the other way around) so the JS-side ``textContent``
+    replacement on the ``<time>`` does not destroy the link.
     """
+    if _ISO_DATE_RE.match(seg.text):
+        safe_iso = html.escape(seg.text)
+        time_el = (
+            f'<time class="local-datetime" datetime="{safe_iso}">{safe_iso}</time>'
+        )
+        if seg.url is None:
+            handle.write(time_el)
+        else:
+            safe_url = html.escape(seg.url, quote=True)
+            handle.write(
+                f'<a href="{safe_url}" target="_blank" rel="noopener">{time_el}</a>'
+            )
+    else:
+        handle.write(_html_link(seg.text, seg.url))
+
+
+def build_forwarded_segments(
+    msg: Message,
+    peer_map: Optional[dict[int, PeerInfo]],
+    tz: Optional[object] = None,
+) -> list[ForwardedSegment]:
+    """Return structured segments for the 'Forwarded from ...' line."""
     info = msg.forward_info
     if info is None:
         return []
 
-    parts: list[tuple[str, object]] = []
-    author = _resolve_peer_name(info.author_id, peer_map)
-    source = _resolve_peer_name(info.source_id, peer_map)
-    origin = author or info.author_signature or source
-    if origin is None:
-        origin_id = info.author_id or info.source_id
-        origin = f"peer {origin_id}" if origin_id is not None else "Unknown"
-    parts.append(("text", f"Forwarded from {origin}"))
-    if source and source != origin:
-        parts.append(("text", f"source: {source}"))
-    if info.date:
-        parts.append(("time", info.date))
+    source = (
+        peer_map.get(info.source_id)
+        if info.source_id is not None and peer_map
+        else None
+    )
+    author = (
+        peer_map.get(info.author_id)
+        if info.author_id is not None and peer_map
+        else None
+    )
+
+    if source is not None:
+        display_name = source.name
+        display_peer = source
+        display_peer_id = info.source_id
+    elif author is not None:
+        display_name = author.name
+        display_peer = author
+        display_peer_id = info.author_id
+    elif info.author_signature:
+        display_name = info.author_signature
+        display_peer = None
+        display_peer_id = None
+    else:
+        fallback_id = info.source_id or info.author_id
+        if fallback_id is None:
+            return []
+        display_name = f"peer {fallback_id}"
+        display_peer = None
+        display_peer_id = None
+
+    name_url = (
+        peer_url(display_peer, display_peer_id)
+        if display_peer is not None and display_peer_id is not None
+        else None
+    )
+
+    date_url = None
+    if (
+        source is not None
+        and info.source_id is not None
+        and info.source_message_id is not None
+    ):
+        date_url = peer_url(source, info.source_id, message_id=info.source_message_id)
+
+    segments: list[ForwardedSegment] = [
+        ForwardedSegment("Forwarded from "),
+        ForwardedSegment(display_name, name_url),
+    ]
+    if info.date is not None:
+        local_date = to_local(info.date, tz) if tz else info.date
+        segments.append(ForwardedSegment(" | "))
+        segments.append(ForwardedSegment(local_date.isoformat(), date_url))
     if info.psa_type:
-        parts.append(("text", f"PSA: {info.psa_type}"))
+        segments.append(ForwardedSegment(f" | PSA: {info.psa_type}"))
     if info.is_imported:
-        parts.append(("text", "imported"))
-    return parts
-
-
-def _forwarded_from(
-    msg: Message,
-    peer_map: Optional[dict[int, str]],
-    tz: Optional[object] = None,
-) -> Optional[str]:
-    parts = _forwarded_from_parts(msg, peer_map, tz)
-    if not parts:
-        return None
-    rendered: list[str] = []
-    for kind, value in parts:
-        if kind == "text":
-            rendered.append(str(value))
-        else:
-            local_date = to_local(value, tz) if tz else value
-            rendered.append(local_date.isoformat())
-    return " | ".join(rendered)
+        segments.append(ForwardedSegment(" | imported"))
+    return segments
 
 
 def _attachment_label(attachment: Attachment) -> str:
@@ -462,7 +541,7 @@ def _attachment_description(attachment: Attachment) -> str:
 
 def _render_markdown_attachment(
     attachment: Attachment,
-    peer_map: Optional[dict[int, str]] = None,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
 ) -> str:
     label = _attachment_label(attachment)
     if attachment.url:
@@ -476,11 +555,13 @@ def _render_markdown_attachment(
     return f"`[{_attachment_description(attachment)}]`"
 
 
-def _peer_names(peer_ids: list[int], peer_map: Optional[dict[int, str]]) -> list[str]:
+def _peer_names(
+    peer_ids: list[int], peer_map: Optional[dict[int, PeerInfo]]
+) -> list[str]:
     names: list[str] = []
     for peer_id in peer_ids:
-        name = peer_map.get(peer_id) if peer_map else None
-        names.append(name or f"peer {peer_id}")
+        info = peer_map.get(peer_id) if peer_map else None
+        names.append(info.name if info is not None else f"peer {peer_id}")
     return names
 
 
@@ -500,7 +581,7 @@ def _poll_percentages(metadata: dict) -> list[Optional[float]]:
 
 def _render_markdown_poll(
     metadata: dict,
-    peer_map: Optional[dict[int, str]] = None,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
 ) -> str:
     question = (metadata.get("question") or "").strip() or "(no question)"
     kind = metadata.get("kind", "poll")
@@ -557,7 +638,7 @@ def _render_markdown_poll(
 def _render_html_poll(
     handle,
     metadata: dict,
-    peer_map: Optional[dict[int, str]],
+    peer_map: Optional[dict[int, PeerInfo]],
 ) -> None:
     question = (metadata.get("question") or "").strip() or "(no question)"
     kind = metadata.get("kind", "poll")
@@ -630,7 +711,7 @@ def _render_html_poll(
 def build_html_stats(
     messages: list[Message],
     title: str,
-    peer_map: Optional[dict[int, str]],
+    peer_map: Optional[dict[int, PeerInfo]],
 ) -> HtmlStats:
     """Build summary stats for the HTML export."""
     timestamps = [msg.timestamp for msg in messages if msg.timestamp]
@@ -688,15 +769,21 @@ def render_markdown(
 
             time_str = local_ts.isoformat() if local_ts else "??:??:??"
             speaker = resolve_speaker(msg, peer_map)
+            speaker_url = _speaker_url(msg, peer_map)
 
             direction = ""
             if show_direction:
                 direction = f" ({msg.speaker_hint()})"
 
-            handle.write(f"**{time_str} — {speaker}{direction}**\n\n")
-            forwarded_from = _forwarded_from(msg, peer_map, tz)
-            if forwarded_from:
-                handle.write(f"*{forwarded_from}*\n\n")
+            handle.write(
+                f"**{time_str} — {_md_link(speaker, speaker_url)}{direction}**\n\n"
+            )
+            forwarded_segments = build_forwarded_segments(msg, peer_map, tz)
+            if forwarded_segments:
+                rendered_forwarded = "".join(
+                    _md_link(seg.text, seg.url) for seg in forwarded_segments
+                )
+                handle.write(f"*{rendered_forwarded}*\n\n")
             if msg.text:
                 handle.write(f"{linkify_markdown(msg.text)}\n\n")
             for attachment in msg.attachments:
@@ -709,7 +796,7 @@ def render_markdown(
 def render_csv(
     messages: list[Message],
     out_path: Path,
-    peer_map: Optional[dict[int, str]] = None,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
     tz: Optional[object] = None,
 ) -> None:
     """Export messages to CSV."""
@@ -811,7 +898,7 @@ def render_html(
     messages: list[Message],
     title: str,
     out_path: Path,
-    peer_map: Optional[dict[int, str]] = None,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
 ) -> None:
     """Export messages to a styled HTML transcript."""
     stats = build_html_stats(messages, title, peer_map)
@@ -923,13 +1010,14 @@ def _render_toolbar(handle) -> None:
 def _render_messages(
     handle,
     messages: list[Message],
-    peer_map: Optional[dict[int, str]],
+    peer_map: Optional[dict[int, PeerInfo]],
 ) -> None:
     handle.write('<div class="chat-card glass" id="chat-card">')
     for msg in messages:
         iso = msg.timestamp.isoformat() if msg.timestamp else ""
         time_str = msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else "??:??:??"
         speaker = resolve_speaker(msg, peer_map)
+        speaker_url = _speaker_url(msg, peer_map)
         direction = "out" if msg.outgoing is True else "in"
         if iso:
             time_el = (
@@ -940,11 +1028,14 @@ def _render_messages(
             time_el = "??:??:??"
         handle.write(f'<div class="msg {direction}" data-iso="{html.escape(iso)}">')
         handle.write('<div class="bubble">')
-        handle.write(f'<div class="meta">[{time_el}] {html.escape(speaker)}</div>')
-        forwarded_parts = _forwarded_from_parts(msg, peer_map)
-        if forwarded_parts:
+        handle.write(
+            f'<div class="meta">[{time_el}] {_html_link(speaker, speaker_url)}</div>'
+        )
+        forwarded_segments = build_forwarded_segments(msg, peer_map)
+        if forwarded_segments:
             handle.write('<div class="meta forwarded">')
-            _render_forwarded_html(handle, forwarded_parts)
+            for seg in forwarded_segments:
+                _render_forwarded_segment_html(handle, seg)
             handle.write("</div>")
         if msg.text:
             handle.write(linkify_html(msg.text))
@@ -958,32 +1049,10 @@ def _render_messages(
     handle.write(_back_to_top_script())
 
 
-def _render_forwarded_html(
-    handle,
-    parts: list[tuple[str, object]],
-) -> None:
-    for index, (kind, value) in enumerate(parts):
-        if index > 0:
-            handle.write(" | ")
-        if kind == "text":
-            handle.write(html.escape(str(value)))
-        else:
-            dt = value
-            iso = dt.isoformat() if dt else ""
-            if iso:
-                handle.write(
-                    f'<time class="local-datetime" '
-                    f'datetime="{html.escape(iso)}">'
-                    f"{html.escape(iso)}</time>"
-                )
-            else:
-                handle.write("")
-
-
 def _render_html_attachment(
     handle,
     attachment: Attachment,
-    peer_map: Optional[dict[int, str]] = None,
+    peer_map: Optional[dict[int, PeerInfo]] = None,
 ) -> None:
     if attachment.kind == "poll" and attachment.metadata:
         _render_html_poll(handle, attachment.metadata, peer_map)

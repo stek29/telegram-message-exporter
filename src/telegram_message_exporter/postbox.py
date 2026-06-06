@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from .hashing import murmur_hash, persistent_hash32
-from .models import Attachment, ForwardInfo, Message
+from .models import Attachment, ForwardInfo, Message, PeerInfo, PeerKind
 from .schema import (
     POSTBOX_FIELD_ALIASES,
     POSTBOX_MEDIA_HELPER_TYPES,
@@ -1109,6 +1109,68 @@ def peer_display(peer: Any) -> Optional[str]:
     return None
 
 
+def _maybe_str(value: Any) -> Optional[str]:
+    """Return ``value`` when it is a non-empty string, else ``None``."""
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _peer_display_name(data: Any) -> Optional[str]:
+    """Extract a display name from a decoded Postbox peer payload."""
+    if not isinstance(data, dict):
+        return None
+    if "fn" in data or "ln" in data:
+        return f"{data.get('fn', '')} {data.get('ln', '')}".strip()
+    if "t" in data:
+        return str(data.get("t"))
+    if "un" in data:
+        return f"@{data.get('un')}"
+    return None
+
+
+def _fallback_peer_name(peer_id: int) -> str:
+    """Return a stable, human-readable name for a peer with no display fields."""
+    return f"peer {peer_id}"
+
+
+def _peer_kind_from_payload(peer_id: int, data: dict) -> PeerKind:
+    """Infer :class:`PeerKind` from peer id and the peer's payload shape."""
+    has_user_name = isinstance(data.get("fn"), str) or isinstance(data.get("ln"), str)
+    has_title = isinstance(data.get("t"), str)
+    if has_user_name and not has_title:
+        return PeerKind.USER
+    if has_title and not has_user_name:
+        return PeerKind.CHANNEL if peer_id <= -1_000_000_000_000 else PeerKind.GROUP
+    if peer_id > 0:
+        return PeerKind.USER
+    if peer_id <= -1_000_000_000_000:
+        return PeerKind.CHANNEL
+    return PeerKind.GROUP
+
+
+def _peer_info_from_payload(peer_id: int, data: Any) -> Optional[PeerInfo]:
+    """Build a :class:`PeerInfo` from a decoded Postbox peer payload."""
+    if not isinstance(data, dict):
+        return None
+    kind = _peer_kind_from_payload(peer_id, data)
+    name = _peer_display_name(data) or _fallback_peer_name(peer_id)
+    if not name:
+        return None
+    raw_flags = data.get("fl") if isinstance(data.get("fl"), int) else 0
+    fake_bit = 8 if kind == PeerKind.USER else 64
+    return PeerInfo(
+        name=name,
+        kind=kind,
+        username=_maybe_str(data.get("un")),
+        phone=_maybe_str(data.get("p")),
+        is_verified=bool(raw_flags & 0b1),
+        is_scam=bool(raw_flags & 0b100),
+        is_fake=bool(raw_flags & fake_bit),
+        is_premium=bool(raw_flags & 0b10000),
+    )
+
+
 def list_peers_postbox(
     rows: Iterable[tuple[bytes, bytes]],
     term: Optional[str],
@@ -1123,7 +1185,10 @@ def list_peers_postbox(
             data = PostboxDecoder(value).decode_root_object()
         except (ValueError, TypeError):
             continue
-        display = peer_display(data)
+        info = _peer_info_from_payload(peer_id, data)
+        if info is None:
+            continue
+        display = info.name
         if not display:
             continue
         if term and term.lower() not in display.lower():
@@ -1132,9 +1197,9 @@ def list_peers_postbox(
     return results
 
 
-def load_peer_map(rows: Iterable[tuple[bytes, bytes]]) -> dict[int, str]:
+def load_peer_map(rows: Iterable[tuple[bytes, bytes]]) -> dict[int, PeerInfo]:
     """Load peer mapping from Postbox t2 rows."""
-    peer_map: dict[int, str] = {}
+    peer_map: dict[int, PeerInfo] = {}
     for key, value in rows:
         peer_id = parse_peer_key(key)
         if peer_id is None or not isinstance(value, (bytes, bytearray)):
@@ -1143,7 +1208,26 @@ def load_peer_map(rows: Iterable[tuple[bytes, bytes]]) -> dict[int, str]:
             data = PostboxDecoder(value).decode_root_object()
         except (ValueError, TypeError):
             continue
-        display = peer_display(data)
-        if display:
-            peer_map[peer_id] = display
+        info = _peer_info_from_payload(peer_id, data)
+        if info is not None:
+            peer_map[peer_id] = info
     return peer_map
+
+
+def peer_url(
+    peer: PeerInfo,
+    peer_id: int,
+    *,
+    message_id: Optional[int] = None,
+) -> Optional[str]:
+    """Build a ``t.me`` URL for a peer, optionally pointing at a specific message."""
+    if peer.username:
+        base = f"https://t.me/{peer.username}"
+    elif peer.kind == PeerKind.CHANNEL:
+        channel_id = -peer_id - 1_000_000_000_000
+        base = f"https://t.me/c/{channel_id}"
+    else:
+        return None
+    if message_id is not None:
+        return f"{base}/{message_id}"
+    return base

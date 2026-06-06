@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -37,6 +38,40 @@ class ForwardInfo:
     author_signature: Optional[str]
     psa_type: Optional[str]
     is_imported: bool = False
+
+
+class PeerKind(enum.Enum):
+    """High-level classification of a Telegram peer."""
+
+    USER = "user"
+    GROUP = "group"
+    CHANNEL = "channel"
+    SECRET_CHAT = "secret_chat"
+
+
+@dataclass(frozen=True)
+class PeerInfo:
+    """Structured peer record derived from a Postbox peer payload."""
+
+    name: str
+    kind: PeerKind
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    is_verified: bool = False
+    is_scam: bool = False
+    is_fake: bool = False
+    is_premium: bool = False
+
+
+@dataclass(frozen=True)
+class ForwardedSegment:
+    """One run of text inside a 'Forwarded from ...' line.
+
+    ``url`` is set when the segment should be rendered as a hyperlink.
+    """
+
+    text: str
+    url: Optional[str] = None
 
 
 @dataclass(frozen=True)

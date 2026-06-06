@@ -31,6 +31,7 @@ from .exporters import (
     render_html,
     render_markdown,
 )
+from .models import PeerInfo
 from .postbox import (
     PostboxMediaResolver,
     iter_postbox_messages,
@@ -138,7 +139,7 @@ def cmd_export(args: argparse.Namespace) -> None:
         end_ts=parse_date_input(args.end_date, end=True),
     )
 
-    peer_map: Optional[dict[int, str]] = None
+    peer_map: Optional[dict[int, PeerInfo]] = None
     if is_postbox_kv_table(conn, table):
         peer_table = PostboxTable.PEER.sqlite_name
         media_table = PostboxTable.MESSAGE_MEDIA.sqlite_name
@@ -226,9 +227,11 @@ def cmd_export(args: argparse.Namespace) -> None:
     print(f"Exported {len(messages)} messages to {out_path}")
 
 
-def _title_from_peer(peer_map: Optional[dict[int, str]], peer_id: Optional[int]) -> str:
+def _title_from_peer(
+    peer_map: Optional[dict[int, PeerInfo]], peer_id: Optional[int]
+) -> str:
     if peer_map and peer_id and peer_id in peer_map:
-        return peer_map[peer_id]
+        return peer_map[peer_id].name
     if peer_id is not None:
         return f"peer {peer_id}"
     return "All Chats"
