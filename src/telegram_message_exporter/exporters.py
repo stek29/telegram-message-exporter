@@ -240,25 +240,24 @@ class RenderOptions:
     """Optional rendering preferences."""
 
     peer_map: Optional[dict[int, str]] = None
-    me_name: str = "Me"
     show_direction: bool = False
 
 
-def resolve_speaker(
-    msg: Message, peer_map: Optional[dict[int, str]], me_name: str
-) -> str:
+def resolve_speaker(msg: Message, peer_map: Optional[dict[int, str]]) -> str:
     """Resolve display name for a message."""
-    if msg.outgoing is True:
-        return me_name
     if peer_map:
         if msg.author_id and msg.author_id in peer_map:
             return peer_map[msg.author_id]
-        if msg.peer_id and msg.peer_id in peer_map:
+        if msg.outgoing is not True and msg.peer_id and msg.peer_id in peer_map:
             return peer_map[msg.peer_id]
     return "Unknown"
 
 
-def build_html_stats(messages: list[Message], title: str, me_name: str) -> HtmlStats:
+def build_html_stats(
+    messages: list[Message],
+    title: str,
+    peer_map: Optional[dict[int, str]],
+) -> HtmlStats:
     """Build summary stats for the HTML export."""
     timestamps = [msg.timestamp for msg in messages if msg.timestamp]
     start = min(timestamps) if timestamps else None
@@ -281,7 +280,14 @@ def build_html_stats(messages: list[Message], title: str, me_name: str) -> HtmlS
             current_day = day_key
             day_entries.append((day_key, day_label))
 
-    participants = f"{me_name} • {title}"
+    participant_names: list[str] = []
+    for msg in messages:
+        speaker = resolve_speaker(msg, peer_map)
+        if speaker != "Unknown" and speaker not in participant_names:
+            participant_names.append(speaker)
+    if title not in participant_names:
+        participant_names.append(title)
+    participants = " • ".join(participant_names)
     exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     return HtmlStats(
         message_count=len(messages),
@@ -301,7 +307,6 @@ def render_markdown(
     """Export messages to Markdown."""
     options = options or RenderOptions()
     peer_map = options.peer_map
-    me_name = options.me_name
     show_direction = options.show_direction
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
@@ -331,7 +336,7 @@ def render_markdown(
             time_str = (
                 msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else "??:??:??"
             )
-            speaker = resolve_speaker(msg, peer_map, me_name)
+            speaker = resolve_speaker(msg, peer_map)
 
             direction = ""
             if show_direction:
@@ -345,7 +350,6 @@ def render_csv(
     messages: list[Message],
     out_path: Path,
     peer_map: Optional[dict[int, str]] = None,
-    me_name: str = "Me",
 ) -> None:
     """Export messages to CSV."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +372,7 @@ def render_csv(
             date_str = ts.strftime("%Y-%m-%d") if ts else ""
             time_str = ts.strftime("%H:%M:%S") if ts else ""
             timestamp = int(ts.timestamp()) if ts else ""
-            speaker = resolve_speaker(msg, peer_map, me_name)
+            speaker = resolve_speaker(msg, peer_map)
             writer.writerow(
                 [
                     date_str,
@@ -388,10 +392,9 @@ def render_html(
     title: str,
     out_path: Path,
     peer_map: Optional[dict[int, str]] = None,
-    me_name: str = "Me",
 ) -> None:
     """Export messages to a styled HTML transcript."""
-    stats = build_html_stats(messages, title, me_name)
+    stats = build_html_stats(messages, title, peer_map)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with out_path.open("w", encoding="utf-8") as handle:
@@ -409,7 +412,7 @@ def render_html(
         _render_header(handle, title)
         _render_stats(handle, stats)
         _render_toolbar(handle, stats.day_entries)
-        _render_messages(handle, messages, peer_map, me_name)
+        _render_messages(handle, messages, peer_map)
         _render_footer(handle)
         handle.write("</div></body></html>")
 
@@ -472,7 +475,6 @@ def _render_messages(
     handle,
     messages: list[Message],
     peer_map: Optional[dict[int, str]],
-    me_name: str,
 ) -> None:
     handle.write('<div class="chat-card glass">')
     current_date = None
@@ -484,7 +486,7 @@ def _render_messages(
                 f'<div id="day-{html.escape(msg_date)}" class="day">'
                 f"{html.escape(day_label)}</div>"
             )
-        speaker = resolve_speaker(msg, peer_map, me_name)
+        speaker = resolve_speaker(msg, peer_map)
         direction = "out" if msg.outgoing is True else "in"
         handle.write(f'<div class="msg {direction}">')
         handle.write('<div class="bubble">')

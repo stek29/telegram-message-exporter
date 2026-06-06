@@ -16,6 +16,8 @@ from .db import (
     detect_message_table,
     fetch_messages,
     is_postbox_kv_table,
+    iter_postbox_message_rows,
+    iter_postbox_peer_rows,
     list_tables,
     preview_value,
     sample_rows,
@@ -137,9 +139,7 @@ def cmd_export(args: argparse.Namespace) -> None:
     peer_map: Optional[dict[int, str]] = None
     if is_postbox_kv_table(conn, table):
         peer_table = PostboxTable.PEER.sqlite_name
-        peer_rows = conn.execute(f"SELECT key, value FROM {peer_table}").fetchall()
-        peer_map = load_peer_map(peer_rows)
-        rows = conn.execute(f"SELECT key, value FROM {table} ORDER BY key").fetchall()
+        rows = iter_postbox_message_rows(conn, table, options, debug=args.debug)
         messages = iter_postbox_messages(
             rows,
             peer_id=options.peer_id,
@@ -147,6 +147,23 @@ def cmd_export(args: argparse.Namespace) -> None:
             end_ts=options.end_ts,
             limit=options.limit,
         )
+        if options.peer_id is None:
+            peer_rows = conn.execute(f"SELECT key, value FROM {peer_table}")
+        else:
+            referenced_peer_ids = {
+                peer_id
+                for message in messages
+                for peer_id in (message.peer_id, message.author_id)
+                if peer_id is not None
+            }
+            referenced_peer_ids.add(options.peer_id)
+            peer_rows = iter_postbox_peer_rows(
+                conn,
+                peer_table,
+                referenced_peer_ids,
+                debug=args.debug,
+            )
+        peer_map = load_peer_map(peer_rows)
     else:
         messages = fetch_messages(conn, table, options)
     conn.close()
@@ -164,14 +181,13 @@ def cmd_export(args: argparse.Namespace) -> None:
             out_path,
             options=RenderOptions(
                 peer_map=peer_map,
-                me_name=args.me_name,
                 show_direction=args.show_direction,
             ),
         )
     elif args.format == "csv":
-        render_csv(messages, out_path, peer_map=peer_map, me_name=args.me_name)
+        render_csv(messages, out_path, peer_map=peer_map)
     elif args.format == "html":
-        render_html(messages, title, out_path, peer_map=peer_map, me_name=args.me_name)
+        render_html(messages, title, out_path, peer_map=peer_map)
     else:
         raise SystemExit(f"Unknown format: {args.format}")
 
@@ -261,9 +277,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export format (md, csv, html)",
     )
     export.add_argument("--out", help="Output file path (defaults by format)")
-    export.add_argument("--me-name", default="Me", help="Label for outgoing messages")
     export.add_argument(
         "--show-direction", action="store_true", help="Append (in)/(out) labels"
+    )
+    export.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print SQL key ranges and query plans",
     )
     export.set_defaults(func=cmd_export)
 

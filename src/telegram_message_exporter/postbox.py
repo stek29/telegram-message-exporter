@@ -465,7 +465,7 @@ def read_intermediate_message(payload: bytes) -> Optional[dict[str, Any]]:
     if MessageDataFlags.GLOBALLY_UNIQUE_ID in data_flags:
         globally_unique_id = reader.read_int64()
 
-    global_tags = GlobalMessageTags()
+    global_tags = GlobalMessageTags(0)
     if MessageDataFlags.GLOBAL_TAGS in data_flags:
         global_tags = GlobalMessageTags(reader.read_uint32())
 
@@ -477,7 +477,7 @@ def read_intermediate_message(payload: bytes) -> Optional[dict[str, Any]]:
     if MessageDataFlags.GROUP_INFO in data_flags:
         group_info_stable_id = reader.read_uint32()
 
-    local_tags = LocalMessageTags()
+    local_tags = LocalMessageTags(0)
     if MessageDataFlags.LOCAL_TAGS in data_flags:
         local_tags = LocalMessageTags(reader.read_uint32())
 

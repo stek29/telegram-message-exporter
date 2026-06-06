@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+import struct
+import sys
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from .models import Message
-from .schema import PostboxTable
+from .schema import MessageNamespace, PostboxTable
 from .utils import parse_timestamp
 
 
@@ -142,6 +145,176 @@ class FetchOptions:
     limit: Optional[int] = None
     start_ts: Optional[int] = None
     end_ts: Optional[int] = None
+
+
+def _prefix_successor(prefix: bytes) -> Optional[bytes]:
+    """Return the smallest byte string greater than every key with this prefix."""
+    successor = bytearray(prefix)
+    for index in range(len(successor) - 1, -1, -1):
+        if successor[index] != 0xFF:
+            successor[index] += 1
+            return bytes(successor[: index + 1])
+    return None
+
+
+def _postbox_key_prefix(
+    peer_id: int,
+    namespace: Optional[int] = None,
+    timestamp: Optional[int] = None,
+) -> bytes:
+    """Encode a leading portion of a MessageHistoryTable key."""
+    if timestamp is not None:
+        if namespace is None:
+            raise ValueError("timestamp requires a namespace")
+        return struct.pack(">qii", peer_id, namespace, timestamp)
+    if namespace is not None:
+        return struct.pack(">qi", peer_id, namespace)
+    return struct.pack(">q", peer_id)
+
+
+def _postbox_range_query(
+    table: str,
+    lower: bytes,
+    upper: Optional[bytes],
+) -> tuple[str, tuple[bytes, ...]]:
+    query = f"SELECT key, value FROM {table} WHERE key >= ?"
+    params = (lower,)
+    if upper is not None:
+        query += " AND key < ?"
+        params += (upper,)
+    return query + " ORDER BY key", params
+
+
+def _debug_postbox_query(
+    conn: sqlite3.Connection,
+    label: str,
+    query: str,
+    params: tuple[object, ...] = (),
+) -> None:
+    print(f"[query] {label}", file=sys.stderr)
+    print(f"[query] SQL: {query}", file=sys.stderr)
+    for index, param in enumerate(params, start=1):
+        if isinstance(param, bytes):
+            display = f"X'{param.hex()}'"
+        else:
+            display = repr(param)
+        print(f"[query] param {index}: {display}", file=sys.stderr)
+    for plan_row in conn.execute(f"EXPLAIN QUERY PLAN {query}", params):
+        print(f"[query] plan: {plan_row[3]}", file=sys.stderr)
+
+
+def _iter_query(
+    conn: sqlite3.Connection,
+    label: str,
+    query: str,
+    params: tuple[object, ...] = (),
+    debug: bool = False,
+) -> Iterable[tuple]:
+    if debug:
+        _debug_postbox_query(conn, label, query, params)
+    started_at = time.monotonic()
+    row_count = 0
+    try:
+        for row in conn.execute(query, params):
+            row_count += 1
+            yield row
+    finally:
+        if debug:
+            elapsed = time.monotonic() - started_at
+            print(
+                f"[query] consumed {row_count} rows in {elapsed:.3f}s: {label}",
+                file=sys.stderr,
+            )
+
+
+def iter_postbox_message_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    options: FetchOptions,
+    debug: bool = False,
+) -> Iterable[tuple]:
+    """Stream Postbox rows using the BLOB primary-key index when possible."""
+    if options.peer_id is None:
+        query = f"SELECT key, value FROM {table} ORDER BY key"
+        yield from _iter_query(
+            conn,
+            "all peers (full ordered scan)",
+            query,
+            debug=debug,
+        )
+        return
+
+    peer_prefix = _postbox_key_prefix(options.peer_id)
+    if options.start_ts is None and options.end_ts is None:
+        query, params = _postbox_range_query(
+            table,
+            peer_prefix,
+            _prefix_successor(peer_prefix),
+        )
+        yield from _iter_query(
+            conn,
+            f"peer {options.peer_id} (single key range)",
+            query,
+            params,
+            debug,
+        )
+        return
+
+    for namespace in MessageNamespace:
+        namespace_prefix = _postbox_key_prefix(options.peer_id, int(namespace))
+        lower = (
+            namespace_prefix
+            if options.start_ts is None
+            else _postbox_key_prefix(
+                options.peer_id,
+                int(namespace),
+                options.start_ts,
+            )
+        )
+        upper = (
+            _prefix_successor(namespace_prefix)
+            if options.end_ts is None
+            else _prefix_successor(
+                _postbox_key_prefix(
+                    options.peer_id,
+                    int(namespace),
+                    options.end_ts,
+                )
+            )
+        )
+        query, params = _postbox_range_query(table, lower, upper)
+        yield from _iter_query(
+            conn,
+            (
+                f"peer {options.peer_id}, namespace "
+                f"{namespace.name} ({int(namespace)}), dated key range"
+            ),
+            query,
+            params,
+            debug,
+        )
+
+
+def iter_postbox_peer_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    peer_ids: Iterable[int],
+    debug: bool = False,
+) -> Iterable[tuple]:
+    """Fetch selected Postbox peer rows through the INTEGER primary-key index."""
+    keys = tuple(sorted(set(peer_ids)))
+    if not keys:
+        return
+
+    placeholders = ", ".join("?" for _ in keys)
+    query = f"SELECT key, value FROM {table} WHERE key IN ({placeholders})"
+    yield from _iter_query(
+        conn,
+        f"selected peers ({len(keys)} exact keys)",
+        query,
+        keys,
+        debug,
+    )
 
 
 @dataclass(frozen=True)

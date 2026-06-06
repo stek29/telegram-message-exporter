@@ -237,7 +237,6 @@ telegram-exporter list-peers --db recovery/plaintext.db --search "Alex"
 telegram-exporter export \
   --db recovery/plaintext.db \
   --peer-id 123456789 \
-  --me-name "Me" \
   --format html \
   --out recovery/alex.html
 ```
@@ -255,7 +254,6 @@ telegram-exporter export \
   --db recovery/plaintext.db \
   --peer-id 123456789 \
   --format html \
-  --me-name "Me" \
   --out recovery/chat.html
 ```
 
@@ -291,6 +289,28 @@ telegram-exporter export \
   --db recovery/plaintext.db \
   --format csv \
   --out recovery/all-chats.csv
+```
+
+### Debug export queries
+
+```bash
+telegram-exporter export \
+  --db recovery/plaintext.db \
+  --peer-id 123456789 \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --debug
+```
+
+Debug output is written to stderr and includes each SQL statement, its
+hex-encoded Postbox key bounds, `EXPLAIN QUERY PLAN` output, elapsed time, and
+the number of rows consumed. An optimized peer export should show indexed
+lookups for both messages and the small set of referenced peer records:
+
+```text
+[query] plan: SEARCH t7 USING INDEX sqlite_autoindex_t7_1 (key>? AND key<?)
+[query] consumed 10 rows in 0.012s: peer 123456789 (single key range)
+[query] plan: SEARCH t2 USING INTEGER PRIMARY KEY (rowid=?)
 ```
 
 ### Inspect an unfamiliar database
@@ -365,8 +385,8 @@ telegram-exporter decrypt \
 | `--end-date` | no | End date, `YYYY-MM-DD` or ISO datetime |
 | `--format` | no | `html`, `md`, or `csv`; default `md` |
 | `--out` | no | Output path; defaults to `chat_export.<format>` |
-| `--me-name` | no | Display label for outgoing messages; default `Me` |
 | `--show-direction` | no | Append `(in)` or `(out)` labels in Markdown |
+| `--debug` | no | Print SQL key ranges and `EXPLAIN QUERY PLAN` output |
 
 ---
 
