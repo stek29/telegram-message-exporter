@@ -120,6 +120,8 @@ class ReplyInfo:
     target_attachment_meta: Optional[str] = None
     target_unavailable: bool = False
     target_forward_info: Optional[ForwardInfo] = None
+    target_via_bot_id: Optional[int] = None
+    target_via_bot_title: Optional[str] = None
 
 
 class PeerKind(enum.Enum):
@@ -171,6 +173,8 @@ class Message:
     forward_info: Optional[ForwardInfo] = None
     message_id: Optional[int] = None
     reply_info: Optional[ReplyInfo] = None
+    via_bot_id: Optional[int] = None
+    via_bot_title: Optional[str] = None
 
     def speaker_hint(self) -> str:
         """Return a concise label for direction when no names are available."""

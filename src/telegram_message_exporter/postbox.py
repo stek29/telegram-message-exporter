@@ -2012,6 +2012,46 @@ def read_intermediate_fwd_info(reader: ByteReader) -> Optional[dict[str, Any]]:
     }
 
 
+def _inline_bot_info_from_attributes(
+    attributes: list[Any],
+) -> tuple[Optional[int], Optional[str]]:
+    """Return the ``(peer_id, title)`` for an inline / business bot attribute.
+
+    Walks the message's attribute list and picks the first
+    ``InlineBotMessageAttribute`` or ``InlineBusinessBotMessageAttribute``
+    that is present. The iOS client only attaches one of these per
+    message, so the order in the list is irrelevant.
+
+    The iOS attribute layout
+    (``submodules/TelegramCore/Sources/SyncCore/SyncCore_InlineBotMessageAttribute.swift``):
+
+    * ``i`` — peer id of the bot (``PeerId.toInt64()``), absent for
+      secret chats.
+    * ``t`` — bot display name / username (used in secret chats and as a
+      fallback when the bot peer is unknown to the local Postbox).
+
+    Returns ``(None, None)`` when no inline-bot attribute is present.
+    """
+    bot_id: Optional[int] = None
+    bot_title: Optional[str] = None
+    for attribute in attributes or []:
+        if not isinstance(attribute, PostboxObject):
+            continue
+        if attribute.type_name not in (
+            "InlineBotMessageAttribute",
+            "InlineBusinessBotMessageAttribute",
+        ):
+            continue
+        payload = attribute.payload
+        raw_peer = payload.get("i")
+        if isinstance(raw_peer, int) and not isinstance(raw_peer, bool):
+            bot_id = int(raw_peer)
+        raw_title = payload.get("t")
+        if isinstance(raw_title, str) and raw_title:
+            bot_title = raw_title
+    return bot_id, bot_title
+
+
 def _decode_quote_payload(raw: Any) -> Optional[str]:
     """Return the ``t`` (snippet text) field from an ``EngineMessageReplyQuote`` blob.
 
@@ -2263,6 +2303,9 @@ def iter_postbox_messages(
         timestamp = datetime.fromtimestamp(idx.timestamp) if idx.timestamp else None
         raw_forward_info = msg.get("fwd")
         forward_info = _build_forward_info(raw_forward_info)
+        via_bot_id, via_bot_title = _inline_bot_info_from_attributes(
+            msg.get("attributes") or []
+        )
         messages.append(
             Message(
                 timestamp=timestamp,
@@ -2276,6 +2319,8 @@ def iter_postbox_messages(
                 reply_info=_reply_info_from_attributes(
                     msg.get("attributes") or [], idx.peer_id
                 ),
+                via_bot_id=via_bot_id,
+                via_bot_title=via_bot_title,
             )
         )
         if limit and len(messages) >= limit:
@@ -2466,6 +2511,9 @@ def resolve_reply_previews(
                 "author_id": decoded.get("author_id"),
                 "attachments": attachments,
                 "fwd": _build_forward_info(decoded.get("fwd")),
+                "via_bot": _inline_bot_info_from_attributes(
+                    decoded.get("attributes") or []
+                ),
             }
             if attachments:
                 target_first_attachment[target_key] = attachments[0]
@@ -2488,6 +2536,7 @@ def resolve_reply_previews(
             )
             continue
         first = target_first_attachment.get(target_key)
+        via_bot_id, via_bot_title = row.get("via_bot") or (None, None)
         updated.append(
             replace(
                 msg,
@@ -2507,6 +2556,8 @@ def resolve_reply_previews(
                         _attachment_meta_string(first) if first is not None else None
                     ),
                     target_forward_info=row.get("fwd"),
+                    target_via_bot_id=via_bot_id,
+                    target_via_bot_title=via_bot_title,
                 ),
             )
         )

@@ -418,6 +418,15 @@ header.header-panel {
   border-left: 2px solid var(--accent);
   color: #bae6fd;
 }
+.via-bot {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  padding-left: 8px;
+  margin-top: 2px;
+}
+.via-bot a { color: var(--accent); font-style: normal; }
+.reply-quote .reply-via { color: var(--muted); font-weight: 400; }
 .reply-quote {
   display: block;
   padding: 6px 10px;
@@ -1150,6 +1159,57 @@ def build_forwarded_segments(
         segments.append(ForwardedSegment(f" | PSA: {info.psa_type}"))
     if info.is_imported:
         segments.append(ForwardedSegment(" | imported"))
+    return segments
+
+
+def _via_bot_segments(
+    msg: Message,
+    peer_map: Optional[dict[int, PeerInfo]],
+) -> list[ForwardedSegment]:
+    """Return structured segments for the 'via @Bot' line.
+
+    Populated from :attr:`Message.via_bot_id` /
+    :attr:`Message.via_bot_title`, both of which are derived from the
+    ``InlineBotMessageAttribute`` / ``InlineBusinessBotMessageAttribute``
+    attribute on the source message.
+
+    Returns an empty list when the message has no inline-bot attribute.
+    When the bot peer id is resolvable through ``peer_map`` the bot's
+    display name is taken from there and a ``t.me/<username>`` link is
+    used when the bot has a public username; otherwise the raw
+    ``via_bot_title`` from the attribute is rendered as plain text
+    (covers the secret-chat case where only the name is stored).
+
+    The shape matches :func:`build_forwarded_segments` so the caller
+    can use the same renderer for the line.
+    """
+    bot_id = msg.via_bot_id
+    bot_title = msg.via_bot_title
+    if bot_id is None and not bot_title:
+        return []
+
+    display_peer: Optional[PeerInfo] = None
+    display_peer_id: Optional[int] = None
+    if bot_id is not None and peer_map:
+        display_peer = peer_map.get(bot_id)
+        display_peer_id = bot_id
+    if display_peer is not None:
+        display_name = display_peer.name
+    elif bot_title:
+        display_name = bot_title
+    else:
+        display_name = f"bot {bot_id}"
+
+    name_url = (
+        peer_url(display_peer, display_peer_id)
+        if display_peer is not None and display_peer_id is not None
+        else None
+    )
+
+    segments: list[ForwardedSegment] = [
+        ForwardedSegment("via "),
+        ForwardedSegment(display_name, name_url),
+    ]
     return segments
 
 
@@ -2659,6 +2719,11 @@ def _render_markdown_reply_line(
     * When the target was itself a forward, the author line is extended
       with ``· Forwarded from **Original**`` between the author and the
       snippet. The "Forwarded from" fragment is plain text (no link).
+    * When the target was sent via an inline bot, an extra
+      ``· via @BotName`` fragment is appended (after the "Forwarded
+      from" fragment when both apply). The "via" fragment is a link to
+      the bot's ``t.me/<username>`` when the bot peer is resolvable and
+      has a username, otherwise plain text.
 
     The ``out_path`` is used to build a same-file in-page anchor for
     intra-chat cases (``{basename}.html#msg-{mid}``). When not given,
@@ -2678,6 +2743,7 @@ def _render_markdown_reply_line(
         author_name = "Unknown"
 
     forwarded_from_name = _reply_forwarded_from_name(reply, peer_map)
+    via_bot_label, via_bot_url = _reply_via_bot_link(reply, peer_map)
 
     href: Optional[str] = None
     if reply.is_intra_chat:
@@ -2698,6 +2764,13 @@ def _render_markdown_reply_line(
     body_label = f"In reply to **{author_name}**"
     if forwarded_from_name:
         body_label = f"{body_label} · Forwarded from **{forwarded_from_name}**"
+    if via_bot_label:
+        via_fragment = (
+            _md_link(via_bot_label, via_bot_url)
+            if via_bot_url
+            else f"**{via_bot_label}**"
+        )
+        body_label = f"{body_label} · via {via_fragment}"
     if text:
         body_label = f"{body_label}: {text}"
 
@@ -3182,6 +3255,17 @@ def _csv_reply_info(
         fwd = reply.target_forward_info
         target_forwarded_from_id = fwd.source_id or fwd.author_id
         target_forwarded_from = _reply_forwarded_from_name(reply, peer_map)
+    target_via_bot_id = reply.target_via_bot_id
+    target_via_bot_title = reply.target_via_bot_title
+    target_via_bot_name: Optional[str] = None
+    target_via_bot_username: Optional[str] = None
+    if target_via_bot_id is not None and peer_map:
+        target_bot_info = peer_map.get(target_via_bot_id)
+        if target_bot_info is not None:
+            target_via_bot_name = target_bot_info.name
+            target_via_bot_username = target_bot_info.username
+    if target_via_bot_name is None and target_via_bot_title:
+        target_via_bot_name = target_via_bot_title
     return json.dumps(
         {
             "target_peer_id": reply.target_peer_id,
@@ -3199,6 +3283,41 @@ def _csv_reply_info(
             "unavailable": reply.target_unavailable,
             "target_forwarded_from_id": target_forwarded_from_id,
             "target_forwarded_from": target_forwarded_from,
+            "target_via_bot_id": target_via_bot_id,
+            "target_via_bot_username": target_via_bot_username,
+            "target_via_bot_name": target_via_bot_name,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _csv_via_bot(msg: Message, peer_map: Optional[dict[int, PeerInfo]]) -> str:
+    """Build the ``via_bot`` CSV cell for ``msg``.
+
+    Returns a JSON object carrying the bot's peer id, display name
+    (resolved from ``peer_map`` when possible), and username; the raw
+    attribute ``title`` is preserved as a fallback. Empty string when
+    the message was not sent via an inline / business bot.
+    """
+    bot_id = msg.via_bot_id
+    bot_title = msg.via_bot_title
+    if bot_id is None and not bot_title:
+        return ""
+    bot_name: Optional[str] = None
+    bot_username: Optional[str] = None
+    if bot_id is not None and peer_map:
+        bot_info = peer_map.get(bot_id)
+        if bot_info is not None:
+            bot_name = bot_info.name
+            bot_username = bot_info.username
+    if bot_name is None and bot_title:
+        bot_name = bot_title
+    return json.dumps(
+        {
+            "bot_id": bot_id,
+            "bot_username": bot_username,
+            "bot_name": bot_name,
+            "bot_title": bot_title,
         },
         ensure_ascii=False,
     )
@@ -3442,6 +3561,12 @@ def render_markdown(
             handle.write(
                 f"**{time_str} — {_md_link(speaker, speaker_url)}{direction}**\n\n"
             )
+            via_segments = _via_bot_segments(msg, peer_map)
+            if via_segments:
+                rendered_via = "".join(
+                    _md_link(seg.text, seg.url) for seg in via_segments
+                )
+                handle.write(f"*{rendered_via}*\n\n")
             reply_line = _render_markdown_reply_line(msg, peer_map, out_path)
             if reply_line:
                 handle.write(f"{reply_line}\n\n")
@@ -3486,6 +3611,7 @@ def render_csv(
                 "peer_id",
                 "author_id",
                 "name_color",
+                "via_bot",
             ]
         )
         for msg in messages:
@@ -3576,6 +3702,7 @@ def render_csv(
                     msg.peer_id or "",
                     msg.author_id or "",
                     _csv_name_color(msg.author_id, peer_map),
+                    _csv_via_bot(msg, peer_map),
                 ]
             )
 
@@ -3746,9 +3873,23 @@ def _render_reply_preview_html(
         author_name = "Unknown"
 
     forwarded_from_name = _reply_forwarded_from_name(reply, peer_map)
+    via_bot_label, via_bot_url = _reply_via_bot_link(reply, peer_map)
 
     text = _reply_preview_text(reply)
     emoji = _reply_emoji_for_kind(reply.target_attachment_kind)
+
+    via_html = ""
+    if via_bot_label:
+        label = html.escape(via_bot_label)
+        if via_bot_url is not None:
+            safe_url = html.escape(via_bot_url, quote=True)
+            via_html = (
+                f' <span class="reply-via">· via '
+                f'<a href="{safe_url}" target="_blank" rel="noopener">'
+                f"{label}</a></span>"
+            )
+        else:
+            via_html = f' <span class="reply-via">· via {label}</span>'
 
     parts: list[str] = []
     if forwarded_from_name:
@@ -3758,10 +3899,16 @@ def _render_reply_preview_html(
             f'<span class="reply-forwarded">'
             f"· Forwarded from {html.escape(forwarded_from_name)}"
             f"</span>"
+            f"{via_html}"
             f"</div>"
         )
     else:
-        parts.append(f'<div class="reply-author">{html.escape(author_name)}</div>')
+        if via_html:
+            parts.append(
+                f'<div class="reply-author">{html.escape(author_name)}{via_html}</div>'
+            )
+        else:
+            parts.append(f'<div class="reply-author">{html.escape(author_name)}</div>')
     snippet_html = ""
     if emoji:
         snippet_html += f'<span class="reply-emoji">{html.escape(emoji)}</span>'
@@ -3827,6 +3974,44 @@ def _reply_forwarded_from_name(
     if fallback_id is not None:
         return f"peer {fallback_id}"
     return None
+
+
+def _reply_via_bot_link(
+    reply: ReplyInfo, peer_map: Optional[dict[int, PeerInfo]]
+) -> tuple[Optional[str], Optional[str]]:
+    """Display name and ``t.me`` link for the *inline bot* a reply target was sent via.
+
+    Returns ``(None, None)`` when the target carries no inline-bot
+    attribute. When ``target_via_bot_id`` is resolvable through
+    ``peer_map`` the bot's display name is taken from there and the
+    link is a ``t.me/<username>`` URL (when the bot has one);
+    otherwise the raw ``target_via_bot_title`` from the attribute is
+    used as the label with no link (covers the secret-chat case where
+    only the name is stored).
+    """
+    bot_id = reply.target_via_bot_id
+    bot_title = reply.target_via_bot_title
+    if bot_id is None and not bot_title:
+        return None, None
+
+    display_peer: Optional[PeerInfo] = None
+    display_peer_id: Optional[int] = None
+    if bot_id is not None and peer_map:
+        display_peer = peer_map.get(bot_id)
+        display_peer_id = bot_id
+    if display_peer is not None:
+        label = display_peer.name
+    elif bot_title:
+        label = bot_title
+    else:
+        label = f"bot {bot_id}"
+
+    url = (
+        peer_url(display_peer, display_peer_id)
+        if display_peer is not None and display_peer_id is not None
+        else None
+    )
+    return label, url
 
 
 def _reply_preview_text(reply: ReplyInfo) -> str:
@@ -3915,6 +4100,12 @@ def _render_messages(
             f'<div class="meta">[{time_el}] '
             f'<span class="speaker">{_html_link(speaker, speaker_url)}</span></div>'
         )
+        via_segments = _via_bot_segments(msg, peer_map)
+        if via_segments:
+            handle.write('<div class="meta via-bot">')
+            for seg in via_segments:
+                _render_forwarded_segment_html(handle, seg)
+            handle.write("</div>")
         if msg.reply_info is not None:
             _render_reply_preview_html(handle, msg, msg.reply_info, peer_map)
         forwarded_segments = build_forwarded_segments(msg, peer_map)
