@@ -26,6 +26,85 @@ HTML_FONTS = (
     'family=JetBrains+Mono:wght@400;600&display=swap">'
 )
 
+PEER_NAME_COLOR_HEX: dict[int, str] = {
+    0: "#e17076",  # red
+    1: "#e7c063",  # orange / yellow
+    2: "#9b8ef1",  # violet
+    3: "#7ec68f",  # green
+    4: "#6ec1e4",  # cyan
+    5: "#5fa5e4",  # blue
+    6: "#d49bd9",  # pink
+}
+
+PEER_COLOR_SOFT_ALPHA = 0.18
+
+
+def _hex_to_soft_rgba(hex_color: str, alpha: float = PEER_COLOR_SOFT_ALPHA) -> str:
+    """Convert ``#rrggbb`` to ``rgba(r, g, b, alpha)``."""
+    value = int(hex_color.lstrip("#"), 16)
+    red = (value >> 16) & 0xFF
+    green = (value >> 8) & 0xFF
+    blue = value & 0xFF
+    return f"rgba({red}, {green}, {blue}, {alpha:g})"
+
+
+def peer_display_color(peer: PeerInfo, peer_id: int) -> tuple[str, str]:
+    """Return ``(solid_hex, soft_rgba)`` for a peer's color coding.
+
+    Uses ``peer.name_color`` when it indexes the ``PEER_NAME_COLOR_HEX``
+    table, otherwise falls back to ``abs(peer_id) % 7`` mapped into the
+    same table.
+    """
+    name_color = peer.name_color
+    if isinstance(name_color, int) and not isinstance(name_color, bool) and name_color in PEER_NAME_COLOR_HEX:
+        solid = PEER_NAME_COLOR_HEX[name_color]
+    else:
+        solid = PEER_NAME_COLOR_HEX[abs(peer_id) % 7]
+    return solid, _hex_to_soft_rgba(solid)
+
+
+def collect_peer_color_map(
+    messages: list[Message], peer_map: Optional[dict[int, PeerInfo]]
+) -> dict[int, tuple[str, str]]:
+    """Build ``{peer_id: (solid, soft)}`` for every peer that appears in ``messages``."""
+    colors: dict[int, tuple[str, str]] = {}
+    for msg in messages:
+        for candidate in (msg.peer_id, msg.author_id):
+            if candidate is None or candidate in colors:
+                continue
+            info = peer_map.get(candidate) if peer_map else None
+            if info is None:
+                info = PeerInfo("peer", None)
+            colors[candidate] = peer_display_color(info, candidate)
+    return colors
+
+
+def _escape_css_selector(value: str) -> str:
+    """Escape a string for safe inclusion inside a CSS attribute selector."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def render_peer_color_css(color_map: dict[int, tuple[str, str]]) -> str:
+    """Emit CSS rules that set ``--peer-color``/``--peer-soft`` per peer id."""
+    if not color_map:
+        return ""
+    rules: list[str] = []
+    for peer_id, (solid, soft) in sorted(color_map.items()):
+        selector = f'.msg[data-peer-id="{_escape_css_selector(str(peer_id))}"]'
+        rules.append(
+            f"{selector} {{ --peer-color: {solid}; --peer-soft: {soft}; }}"
+        )
+        rules.append(
+            f"{selector} .bubble {{ border-left-color: var(--peer-color); }}"
+        )
+        rules.append(
+            f"{selector} .meta .speaker, "
+            f"{selector} .meta .speaker a "
+            f"{{ color: var(--peer-color); font-weight: 600; }}"
+        )
+    return "/* per-peer colors */\n" + "\n".join(rules) + "\n"
+
+
 HTML_CSS = """
 :root {
   --bg-0: #0b1120;
@@ -197,6 +276,7 @@ header.header-panel {
   border-radius: 14px;
   max-width: 72%;
   border: 1px solid rgba(148, 163, 184, 0.2);
+  border-left: 3px solid transparent;
   background: var(--bubble-in);
   box-shadow: 0 8px 20px var(--bubble-shadow);
   white-space: pre-wrap;
@@ -204,6 +284,32 @@ header.header-panel {
   word-break: break-word;
 }
 .msg.out .bubble { background: var(--bubble-out); }
+.meta .speaker { font-weight: 600; }
+.participant-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+}
+.participant {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid var(--glass-border);
+  color: #f1f5f9;
+  max-width: 100%;
+}
+.participant .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.6);
+}
 .bubble img, .bubble video { max-width: 100%; height: auto; border-radius: 10px; }
 .bubble audio { width: min(420px, 100%); }
 .video-message {
@@ -317,13 +423,22 @@ a:hover { text-decoration: underline; }
 
 
 @dataclass(frozen=True)
+class ParticipantEntry:
+    """One participant shown in the HTML header legend."""
+
+    peer_id: Optional[int]
+    name: str
+    color: str
+
+
+@dataclass(frozen=True)
 class HtmlStats:
     """Computed stats for HTML output."""
 
     message_count: int
     start_iso: Optional[str]
     end_iso: Optional[str]
-    participants: str
+    participants: tuple[ParticipantEntry, ...]
     exported_at: str
 
 
@@ -391,6 +506,11 @@ def copy_message_media(
             updated_attachments.append(
                 replace(
                     attachment,
+                    selected_cache_key=(
+                        selected_key
+                        if selected_key is not None
+                        else attachment.selected_cache_key
+                    ),
                     exported_path=(Path(target_dir.name) / target_name).as_posix(),
                 )
             )
@@ -556,9 +676,19 @@ def _attachment_description(attachment: Attachment) -> str:
         details.append(attachment.filename)
     if attachment.mime_type:
         details.append(attachment.mime_type)
-    if attachment.cache_key and not attachment.exported_path:
-        details.append(f"cache: {attachment.cache_key}")
+    cache_key = attachment.selected_cache_key or attachment.cache_key
+    if cache_key:
+        details.append(f"cache: {cache_key}")
+    if _is_preview_attachment(attachment):
+        details.append("preview")
     return " | ".join(details)
+
+
+def _is_preview_attachment(attachment: Attachment) -> bool:
+    """Return True when the rendered file came from an alternate cache key."""
+    if not attachment.selected_cache_key or not attachment.alternate_cache_keys:
+        return False
+    return attachment.selected_cache_key in attachment.alternate_cache_keys
 
 
 def _render_markdown_attachment(
@@ -570,8 +700,10 @@ def _render_markdown_attachment(
         return f"[{label}]({attachment.url})"
     if attachment.exported_path:
         if attachment.kind == "image":
-            return f"![{label}]({attachment.exported_path})"
-        return f"[{label}]({attachment.exported_path})"
+            primary = f"![{label}]({attachment.exported_path})"
+        else:
+            primary = f"[{label}]({attachment.exported_path})"
+        return f"{primary}\n`[{_attachment_description(attachment)}]`"
     if attachment.kind == "poll" and attachment.metadata:
         return _render_markdown_poll(attachment.metadata, peer_map)
     return f"`[{_attachment_description(attachment)}]`"
@@ -585,6 +717,19 @@ def _peer_names(
         info = peer_map.get(peer_id) if peer_map else None
         names.append(info.name if info is not None else f"peer {peer_id}")
     return names
+
+
+def _csv_name_color(
+    peer_id: Optional[int],
+    peer_map: Optional[dict[int, PeerInfo]],
+) -> object:
+    """Return the author's name color for CSV export (empty when unknown)."""
+    if peer_id is None or peer_map is None:
+        return ""
+    info = peer_map.get(peer_id)
+    if info is None or info.name_color is None:
+        return ""
+    return info.name_color
 
 
 def _poll_percentages(metadata: dict) -> list[Optional[float]]:
@@ -740,20 +885,42 @@ def build_html_stats(
     start = min(timestamps) if timestamps else None
     end = max(timestamps) if timestamps else None
 
-    participant_names: list[str] = []
+    color_map = collect_peer_color_map(messages, peer_map)
+
+    seen: set[tuple[Optional[int], str]] = set()
+    entries: list[ParticipantEntry] = []
     for msg in messages:
         speaker = resolve_speaker(msg, peer_map)
-        if speaker != "Unknown" and speaker not in participant_names:
-            participant_names.append(speaker)
-    if title not in participant_names:
-        participant_names.append(title)
-    participants = " • ".join(participant_names)
+        if speaker == "Unknown":
+            continue
+        peer_id = msg.author_id if msg.author_id is not None else msg.peer_id
+        key = (peer_id, speaker)
+        if key in seen:
+            continue
+        seen.add(key)
+        solid, _ = color_map.get(peer_id) if peer_id is not None else (None, None)
+        if solid is None:
+            solid = peer_display_color(
+                peer_map.get(peer_id)
+                if peer_map and peer_id is not None
+                else PeerInfo("peer", None),
+                peer_id if peer_id is not None else 0,
+            )[0]
+        entries.append(ParticipantEntry(peer_id, speaker, solid))
+    title_entry = next((entry for entry in entries if entry.name == title), None)
+    if title_entry is None:
+        title_color, _ = peer_display_color(PeerInfo("peer", None), 0)
+        title_entry = ParticipantEntry(None, title, title_color)
+        entries.append(title_entry)
+    elif title_entry.peer_id is None:
+        entries.remove(title_entry)
+        entries.append(title_entry)
     exported_at = datetime.now(tz=timezone.utc).isoformat()
     return HtmlStats(
         message_count=len(messages),
         start_iso=start.isoformat() if start else None,
         end_iso=end.isoformat() if end else None,
-        participants=participants,
+        participants=tuple(entries),
         exported_at=exported_at,
     )
 
@@ -837,6 +1004,7 @@ def render_csv(
                 "forward_info",
                 "peer_id",
                 "author_id",
+                "name_color",
             ]
         )
         for msg in messages:
@@ -864,6 +1032,7 @@ def render_csv(
                                 "alternate_cache_keys": (
                                     attachment.alternate_cache_keys
                                 ),
+                                "selected_cache_key": attachment.selected_cache_key,
                                 "source_path": attachment.source_path,
                                 "url": attachment.url,
                                 "metadata": attachment.metadata,
@@ -912,6 +1081,7 @@ def render_csv(
                     ),
                     msg.peer_id or "",
                     msg.author_id or "",
+                    _csv_name_color(msg.author_id, peer_map),
                 ]
             )
 
@@ -924,6 +1094,7 @@ def render_html(
 ) -> None:
     """Export messages to a styled HTML transcript."""
     stats = build_html_stats(messages, title, peer_map)
+    color_map = collect_peer_color_map(messages, peer_map)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with out_path.open("w", encoding="utf-8") as handle:
@@ -931,7 +1102,8 @@ def render_html(
         handle.write(f"<title>{html.escape(title)}</title>")
         handle.write(HTML_BOOTSTRAP)
         handle.write(HTML_FONTS)
-        handle.write(f"<style>{HTML_CSS}</style></head><body>")
+        handle.write(f"<style>{HTML_CSS}{render_peer_color_css(color_map)}</style>")
+        handle.write("</head><body>")
         handle.write('<div class="background-blobs">')
         handle.write('<div class="blob blob-1"></div>')
         handle.write('<div class="blob blob-2"></div>')
@@ -1008,12 +1180,21 @@ def _render_stats(handle, stats: HtmlStats) -> None:
     handle.write(
         '<div class="stat-card glass">'
         '<div class="stat-info"><span class="label">Participants</span>'
-        f'<span class="value">{html.escape(stats.participants)}</span></div></div>'
+        '<span class="value"><div class="participant-list">'
     )
+    for entry in stats.participants:
+        safe_name = html.escape(entry.name)
+        safe_color = html.escape(entry.color)
+        handle.write(
+            f'<span class="participant" style="color:{safe_color}">'
+            f'<span class="swatch" style="background:{safe_color}"></span>'
+            f"{safe_name}</span>"
+        )
+    handle.write("</div></span></div></div>")
     handle.write(
         '<div class="stat-card glass">'
         '<div class="stat-info"><span class="label">Exported</span>'
-        f'<span class="value mono">'
+        '<span class="value mono">'
         f'<time class="local-datetime" datetime="{html.escape(stats.exported_at)}">'
         f"{html.escape(stats.exported_at)}</time></span></div></div>"
     )
@@ -1041,6 +1222,12 @@ def _render_messages(
         speaker = resolve_speaker(msg, peer_map)
         speaker_url = _speaker_url(msg, peer_map)
         direction = "out" if msg.outgoing is True else "in"
+        peer_id = msg.author_id if msg.author_id is not None else msg.peer_id
+        peer_id_attr = (
+            f' data-peer-id="{html.escape(str(peer_id))}"'
+            if peer_id is not None
+            else ""
+        )
         if iso:
             time_el = (
                 f'<time class="local-time" datetime="{html.escape(iso)}">'
@@ -1048,10 +1235,13 @@ def _render_messages(
             )
         else:
             time_el = "??:??:??"
-        handle.write(f'<div class="msg {direction}" data-iso="{html.escape(iso)}">')
+        handle.write(
+            f'<div class="msg {direction}" data-iso="{html.escape(iso)}"{peer_id_attr}>'
+        )
         handle.write('<div class="bubble">')
         handle.write(
-            f'<div class="meta">[{time_el}] {_html_link(speaker, speaker_url)}</div>'
+            f'<div class="meta">[{time_el}] '
+            f'<span class="speaker">{_html_link(speaker, speaker_url)}</span></div>'
         )
         forwarded_segments = build_forwarded_segments(msg, peer_map)
         if forwarded_segments:
@@ -1084,6 +1274,7 @@ def _render_html_attachment(
         url = html.escape(attachment.url, quote=True)
         handle.write(f'<div><a href="{url}">{label}</a></div>')
         return
+    description = _attachment_description(attachment)
     if attachment.exported_path:
         path = html.escape(attachment.exported_path, quote=True)
         mime_type = html.escape(attachment.mime_type or "", quote=True)
@@ -1121,10 +1312,9 @@ def _render_html_attachment(
             )
         else:
             handle.write(f'<div><a download href="{path}">{label}</a></div>')
+        handle.write(f'<div class="meta">{html.escape(description)}</div>')
         return
-    handle.write(
-        f'<div class="meta">{html.escape(_attachment_description(attachment))}</div>'
-    )
+    handle.write(f'<div class="meta">{html.escape(description)}</div>')
 
 
 def _back_to_top_script() -> str:

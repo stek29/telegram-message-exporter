@@ -1159,6 +1159,11 @@ def _peer_info_from_payload(peer_id: int, data: Any) -> Optional[PeerInfo]:
         return None
     raw_flags = data.get("fl") if isinstance(data.get("fl"), int) else 0
     fake_bit = 8 if kind == PeerKind.USER else 64
+    raw_name_color = data.get("nclr")
+    name_color = raw_name_color if (
+        isinstance(raw_name_color, int) and not isinstance(raw_name_color, bool)
+        and raw_name_color >= 0
+    ) else None
     return PeerInfo(
         name=name,
         kind=kind,
@@ -1168,6 +1173,7 @@ def _peer_info_from_payload(peer_id: int, data: Any) -> Optional[PeerInfo]:
         is_scam=bool(raw_flags & 0b100),
         is_fake=bool(raw_flags & fake_bit),
         is_premium=bool(raw_flags & 0b10000),
+        name_color=name_color,
     )
 
 

@@ -17,6 +17,7 @@ class Attachment:
     mime_type: Optional[str] = None
     cache_key: Optional[str] = None
     alternate_cache_keys: tuple[str, ...] = ()
+    selected_cache_key: Optional[str] = None
     source_path: Optional[str] = None
     exported_path: Optional[str] = None
     width: Optional[int] = None
@@ -61,6 +62,7 @@ class PeerInfo:
     is_scam: bool = False
     is_fake: bool = False
     is_premium: bool = False
+    name_color: Optional[int] = None
 
 
 @dataclass(frozen=True)
