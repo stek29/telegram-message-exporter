@@ -9,6 +9,7 @@ from typing import Iterable, Optional, Protocol
 import hashlib
 import importlib
 import os
+import sqlite3
 import struct
 
 from .hashing import TEMPKEY_MURMUR_SEED, murmur_hash, murmur_hash_bytes
@@ -73,6 +74,19 @@ class DecryptResult:
 
     key_info: KeyDerivationInfo
     match: SqlCipherMatch
+
+
+@dataclass(frozen=True)
+class OpenResult:
+    """Result of opening a Telegram database (plaintext or encrypted).
+
+    For plaintext opens only `connection` is set; for encrypted opens all three
+    fields are populated.
+    """
+
+    connection: object
+    key_info: Optional[KeyDerivationInfo] = None
+    match: Optional[SqlCipherMatch] = None
 
 
 class SqlCipherConnection(Protocol):
@@ -334,14 +348,26 @@ def _apply_pragmas(conn, pragmas: dict[str, str | int]) -> None:
         conn.execute(f"PRAGMA {name} = {value}")
 
 
+def _open_readonly(connector, path: Path):
+    """Open a SQLite-compatible database file in read-only mode via URI form."""
+    return connector(f"file:{path}?mode=ro", uri=True)
+
+
 def _open_with_profile(
-    db_path: Path, candidate: KeyCandidate, profile: SqlCipherProfile
+    db_path: Path,
+    candidate: KeyCandidate,
+    profile: SqlCipherProfile,
+    readonly: bool = False,
 ):
     if SQLCIPHER is None:
         raise SystemExit(
             "Missing dependency: sqlcipher3 (or pysqlcipher3). Install it to decrypt."
         )
-    conn = SQLCIPHER.connect(str(db_path))
+    conn = (
+        _open_readonly(SQLCIPHER.connect, db_path)
+        if readonly
+        else SQLCIPHER.connect(str(db_path))
+    )
     if profile.compat is not None and profile.compat_before_key:
         conn.execute(f"PRAGMA cipher_compatibility = {profile.compat}")
     if profile.pragmas:
@@ -362,11 +388,12 @@ def open_sqlcipher_connection(
     db_path: Path,
     candidates: Iterable[KeyCandidate],
     profiles: Iterable[SqlCipherProfile],
+    readonly: bool = False,
 ) -> Optional[SqlCipherMatch]:
     """Attempt to open the encrypted database with candidate keys."""
     for candidate in candidates:
         for profile in profiles:
-            conn = _open_with_profile(db_path, candidate, profile)
+            conn = _open_with_profile(db_path, candidate, profile, readonly=readonly)
             if conn is not None:
                 return SqlCipherMatch(conn, candidate, profile)
     return None
@@ -391,15 +418,47 @@ def decrypt_database(
     out_path: Path,
     passcodes: Iterable[bytes],
 ) -> DecryptResult:
-    """Decrypt an encrypted Telegram database into a plaintext SQLite DB."""
-    key_info = derive_key_candidates(key_path, passcodes)
-    if not key_info.candidates:
-        raise SystemExit("Unable to derive any key material from .tempkeyEncrypted.")
+    """Decrypt an encrypted Telegram database into a plaintext SQLite DB.
 
-    match = open_sqlcipher_connection(db_path, key_info.candidates, build_profiles())
+    The encrypted source is opened in read-only mode and the plaintext copy is
+    produced by `ATTACH`ing a new database and writing the rows there.
+    """
+    result = open_database(db_path, key_path, passcodes, readonly=True)
+    if result.key_info is None or result.match is None:
+        raise SystemExit("Internal error: encrypted open did not produce key material.")
+    try:
+        export_plaintext_db(result.connection, out_path)
+    finally:
+        result.connection.close()
+    return DecryptResult(key_info=result.key_info, match=result.match)
+
+
+def open_database(
+    db_path: Path,
+    key_path: Optional[Path],
+    passcodes: Optional[Iterable[bytes]],
+    readonly: bool = True,
+) -> OpenResult:
+    """Open a Telegram database, encrypted or plaintext.
+
+    When `key_path` is given the database is treated as encrypted and a key
+    is derived from `.tempkeyEncrypted`. Otherwise the file is opened as a
+    plaintext SQLite database. `readonly=True` opens the file in read-only
+    mode (the default for read-only subcommands); pass `readonly=False` to
+    allow writes (used by `decrypt`).
+    """
+    if key_path is None:
+        if readonly:
+            return OpenResult(connection=_open_readonly(sqlite3.connect, db_path))
+        return OpenResult(connection=sqlite3.connect(str(db_path)))
+
+    resolved = list(passcodes) if passcodes is not None else read_passcodes(None)
+    key_info = derive_key_candidates(key_path, resolved)
+    if not key_info.candidates:
+        raise SystemExit("Unable to derive any key material from --key.")
+    match = open_sqlcipher_connection(
+        db_path, key_info.candidates, build_profiles(), readonly=readonly
+    )
     if match is None:
         raise SystemExit("Failed to decrypt database. Check passcode and key file.")
-
-    export_plaintext_db(match.connection, out_path)
-    match.connection.close()
-    return DecryptResult(key_info, match)
+    return OpenResult(connection=match.connection, key_info=key_info, match=match)

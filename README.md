@@ -59,8 +59,12 @@ not been overwritten or synced away.
 
 `telegram-message-exporter` provides a focused recovery path:
 
-- decrypt the local SQLCipher database using `.tempkeyEncrypted`
-- inspect the resulting plaintext SQLite copy
+- copy `.tempkeyEncrypted` and the encrypted `db_sqlite` to a working
+  directory and point the read subcommands at the copies via `--key`/`--db`
+  (the recommended path; the originals are also accepted and opened
+  read-only)
+- optionally run `decrypt` to produce a standalone `plaintext.db` for
+  other SQLite tools
 - list likely peers and contacts
 - export one chat or all decoded messages to a clean transcript
 
@@ -71,15 +75,16 @@ messages back into Telegram, or upload recovered data anywhere.
 
 1. Stop using Telegram on the Mac as soon as possible.
 2. Keep the Mac offline if you are trying to preserve a recently deleted chat.
-3. Copy the Telegram key and database to a separate working directory before
-   experimenting.
+3. Copy `.tempkeyEncrypted` and the encrypted `db_sqlite` into a separate
+   working directory. The exporter opens them in read-only mode, but
+   working from copies is the safest default.
 4. Install the tool in a virtual environment.
-5. Decrypt to `plaintext.db`.
-6. Run `list-peers` to find the chat you care about.
-7. Export HTML first for reading, then CSV if you need analysis in a
+5. Run `list-peers --key --db` against the copies from step 3 to find the
+   chat you care about.
+6. Export HTML first for reading, then CSV if you need analysis in a
    spreadsheet.
-8. Store `plaintext.db` and transcript files securely; they contain private
-   message content.
+7. If you produced a `plaintext.db` with `decrypt`, store it securely
+   alongside the transcripts; both contain private message content.
 
 ---
 
@@ -107,23 +112,38 @@ messages back into Telegram, or upload recovered data anywhere.
 
 ## 🔄 How It Works
 
-The normal recovery flow has two phases: decrypt the database, then export from
-the plaintext copy.
+The recommended flow is to copy `.tempkeyEncrypted` and the encrypted
+`db_sqlite` into a working directory, then point `list-peers` / `diagnose` /
+`export` at the copies via `--key` / `--db`. Both the encrypted and the
+plaintext database are opened in read-only mode, so the originals (or
+the copies) cannot be modified by these commands. The `decrypt` subcommand
+is a thin wrapper for users who also want a standalone plaintext file
+(for example, to inspect with other SQLite tools).
 
 ```mermaid
 flowchart TD
     A[Native Telegram for macOS data] --> B[.tempkeyEncrypted]
     A --> C[account-*/postbox/db/db_sqlite]
-    B --> D[telegram-exporter decrypt]
-    C --> D
-    D --> E[plaintext.db]
-    E --> F[list-peers]
-    E --> G[diagnose]
-    F --> H[export --peer-id or --contact]
-    G --> H
-    H --> I[HTML transcript]
-    H --> J[Markdown transcript]
-    H --> K[CSV dataset]
+
+    B --> D1[list-peers --key --db]
+    B --> D2[export --key --db --peer-id or --contact]
+    B --> D3[diagnose --key --db]
+    C --> D1
+    C --> D2
+    C --> D3
+    D2 --> E[HTML transcript]
+    D2 --> F[Markdown transcript]
+    D2 --> G[CSV dataset]
+
+    B --> H[decrypt --key --db --out]
+    C --> H
+    H --> I[plaintext.db]
+    I --> J[list-peers --db]
+    I --> K[diagnose --db]
+    I --> L[export --db --peer-id or --contact]
+    L --> E
+    L --> F
+    L --> G
 ```
 
 The CLI never needs Telegram network access. Everything comes from local files
@@ -135,18 +155,29 @@ sequenceDiagram
     participant CLI as telegram-exporter
     participant Key as .tempkeyEncrypted
     participant DB as db_sqlite
-    participant Plain as plaintext.db
     participant Out as transcript file
 
+    rect rgba(120,180,255,0.08)
+    Note over User,Out: Direct path (recommended)
+    User->>CLI: list-peers --key --db
+    CLI->>Key: derive local key candidates
+    CLI->>DB: open encrypted SQLCipher in read-only mode
+    CLI-->>User: print peer candidates
+    User->>CLI: export --key --db --peer-id ID
+    CLI->>DB: open encrypted SQLCipher in read-only mode
+    CLI->>Out: render HTML, Markdown, or CSV
+    end
+
+    rect rgba(180,180,180,0.08)
+    Note over User,Out: Decrypt-first path (optional)
     User->>CLI: decrypt --key --db --out plaintext.db
     CLI->>Key: derive local key candidates
-    CLI->>DB: open encrypted SQLCipher database
-    CLI->>Plain: write plaintext SQLite copy
-    User->>CLI: list-peers --db plaintext.db
-    CLI->>Plain: inspect peer records
-    User->>CLI: export --db plaintext.db --peer-id ...
-    CLI->>Plain: parse messages and peer map
+    CLI->>DB: open encrypted SQLCipher in read-only mode
+    CLI->>CLI: ATTACH plaintext.db and sqlcipher_export
+    User->>CLI: export --db plaintext.db --peer-id ID
+    CLI->>CLI: parse messages and peer map
     CLI->>Out: render HTML, Markdown, or CSV
+    end
 ```
 
 ---
@@ -206,13 +237,55 @@ You need:
 - `.tempkeyEncrypted`, which is hidden from plain `ls` because it starts with `.`
 - the matching `account-*/postbox/db/db_sqlite`
 
-### 3. Decrypt to a working copy
+### 3. Copy the key and database to a working directory (recommended)
+
+`list-peers`, `diagnose`, and `export` open both encrypted and plaintext
+databases in read-only mode, so they cannot mutate the originals. Even so,
+the recommended workflow is to copy `.tempkeyEncrypted` and the encrypted
+`db_sqlite` into a separate working directory, then point the CLI at the
+copies via `--key` / `--db`. That way the live Telegram data is never
+touched, and no `plaintext.db` is left behind unless you actually need one.
+
+```bash
+mkdir -p ~/recovery
+cp "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" ~/recovery/
+cp "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" ~/recovery/db_sqlite
+```
+
+If Telegram Passcode Lock is enabled, you'll also need to pass `--passcode`
+(or set `TG_LOCAL_PASSCODE`) in the commands that follow.
+
+### 4. Find a peer
+
+```bash
+telegram-exporter list-peers \
+  --key ~/recovery/.tempkeyEncrypted \
+  --db ~/recovery/db_sqlite \
+  --search "Alex"
+```
+
+### 5. Export a transcript
+
+```bash
+telegram-exporter export \
+  --key ~/recovery/.tempkeyEncrypted \
+  --db ~/recovery/db_sqlite \
+  --peer-id 123456789 \
+  --format html \
+  --out ~/recovery/alex.html
+```
+
+### 6. (Optional) Decrypt to a standalone plaintext SQLite file
+
+If you want a `plaintext.db` you can open with other SQLite tools (or
+re-export from without re-deriving the key each time), run `decrypt`
+against the working copy from step 3:
 
 ```bash
 telegram-exporter decrypt \
-  --key "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" \
-  --db "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" \
-  --out recovery/plaintext.db
+  --key ~/recovery/.tempkeyEncrypted \
+  --db ~/recovery/db_sqlite \
+  --out ~/recovery/plaintext.db
 ```
 
 If Telegram Passcode Lock is enabled:
@@ -220,32 +293,59 @@ If Telegram Passcode Lock is enabled:
 ```bash
 TG_LOCAL_PASSCODE="your-passcode" \
 telegram-exporter decrypt \
-  --key "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" \
-  --db "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" \
-  --out recovery/plaintext.db
+  --key ~/recovery/.tempkeyEncrypted \
+  --db ~/recovery/db_sqlite \
+  --out ~/recovery/plaintext.db
 ```
 
-### 4. Find a peer
-
-```bash
-telegram-exporter list-peers --db recovery/plaintext.db --search "Alex"
-```
-
-### 5. Export a transcript
-
-```bash
-telegram-exporter export \
-  --db recovery/plaintext.db \
-  --peer-id 123456789 \
-  --format html \
-  --out recovery/alex.html
-```
+After this you can use the same read subcommands against
+`~/recovery/plaintext.db` instead of passing `--key` (see the
+[Usage](#usage) section for the two interchangeable forms).
 
 ---
 
 <a id="usage"></a>
 
 ## 🧪 Usage
+
+### Skip the `decrypt` step and read the encrypted `db_sqlite` directly
+
+Every read subcommand (`diagnose`, `list-peers`, `export`) accepts the same
+`--key` and `--passcode` flags as `decrypt`. When `--key` is present the
+database is opened as SQLCipher in read-only mode; when it's absent the file
+is opened as a plaintext SQLite database (also in read-only mode). The two
+forms are interchangeable beyond that:
+
+```bash
+# Plaintext (from a prior `decrypt`):
+telegram-exporter list-peers --db recovery/plaintext.db --search "Alex"
+telegram-exporter export --db recovery/plaintext.db --peer-id 123456789
+
+# Encrypted (no plaintext copy on disk):
+telegram-exporter list-peers \
+  --key "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" \
+  --db "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" \
+  --search "Alex"
+
+telegram-exporter export \
+  --key "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/.tempkeyEncrypted" \
+  --db "$HOME/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/stable/account-123456/postbox/db/db_sqlite" \
+  --peer-id 123456789
+```
+
+If Telegram Passcode Lock is enabled, add `--passcode` (or set
+`TG_LOCAL_PASSCODE`):
+
+```bash
+TG_LOCAL_PASSCODE="your-passcode" telegram-exporter export \
+  --key /path/to/.tempkeyEncrypted \
+  --db /path/to/db_sqlite \
+  --peer-id 123456789
+```
+
+`--db` is always opened in read-only mode — the encrypted SQLCipher file
+and the plaintext SQLite file alike — so you cannot accidentally mutate
+the original `db_sqlite` from these commands.
 
 ### Export HTML for one chat
 
@@ -349,8 +449,8 @@ telegram-exporter decrypt \
 
 | Command | Purpose |
 | --- | --- |
-| `decrypt` | Decrypt Telegram's encrypted `db_sqlite` to a plaintext SQLite file |
-| `diagnose` | List tables, columns, and sample rows from a plaintext database |
+| `decrypt` | Decrypt Telegram's encrypted `db_sqlite` to a plaintext SQLite file (optional; read commands can use `--key` directly) |
+| `diagnose` | List tables, columns, and sample rows from a Telegram database |
 | `list-peers` | Find likely peer IDs by name fragment |
 | `export` | Render messages to HTML, Markdown, or CSV |
 
@@ -368,21 +468,27 @@ telegram-exporter decrypt \
 
 | Flag | Required | Description |
 | --- | --- | --- |
-| `--db` | yes | Path to plaintext SQLite database |
+| `--db` | yes | Path to a Telegram DB (plaintext or encrypted `db_sqlite`); always opened in read-only mode |
+| `--key` | no | Path to `.tempkeyEncrypted`; when given, `--db` is opened as SQLCipher instead of as plaintext SQLite |
+| `--passcode` | no | Telegram local passcode; can also use `TG_LOCAL_PASSCODE`. Ignored for plaintext DBs. |
 | `--table` | no | Table to sample; defaults to `t7` when present |
 
 ### `list-peers`
 
 | Flag | Required | Description |
 | --- | --- | --- |
-| `--db` | yes | Path to plaintext SQLite database |
+| `--db` | yes | Path to a Telegram DB (plaintext or encrypted `db_sqlite`); always opened in read-only mode |
+| `--key` | no | Path to `.tempkeyEncrypted`; when given, `--db` is opened as SQLCipher instead of as plaintext SQLite |
+| `--passcode` | no | Telegram local passcode; can also use `TG_LOCAL_PASSCODE`. Ignored for plaintext DBs. |
 | `--search` | no | Name fragment to filter peers |
 
 ### `export`
 
 | Flag | Required | Description |
 | --- | --- | --- |
-| `--db` | yes | Path to plaintext SQLite database |
+| `--db` | yes | Path to a Telegram DB (plaintext or encrypted `db_sqlite`); always opened in read-only mode |
+| `--key` | no | Path to `.tempkeyEncrypted`; when given, `--db` is opened as SQLCipher instead of as plaintext SQLite |
+| `--passcode` | no | Telegram local passcode; can also use `TG_LOCAL_PASSCODE`. Ignored for plaintext DBs. |
 | `--contact` | no | Contact name to resolve to a peer |
 | `--peer-id` | no | Numeric peer ID to export |
 | `--table` | no | Override detected message table |
@@ -450,8 +556,8 @@ Native Telegram for macOS typically stores recovery-relevant files here:
 ```
 
 The `account-*` directory must match the database you are decrypting. If there
-are multiple accounts, try `list-peers` after decrypting each one and keep notes
-about which plaintext database came from which account directory.
+are multiple accounts, try `list-peers` (with `--key` for each `account-*`) and
+keep notes about which `account-*` directory produced which peer results.
 
 ---
 
@@ -459,10 +565,13 @@ about which plaintext database came from which account directory.
 
 ## 🔐 Safety and Privacy
 
-- Work from copies of Telegram files whenever possible.
+- Copy `.tempkeyEncrypted` and the encrypted `db_sqlite` into a working
+  directory and run the exporter against the copies. The read subcommands
+  also accept the original paths (they open in read-only mode), but working
+  from copies is the safest default.
 - Keep the Mac offline during time-sensitive recovery to avoid sync changes.
-- Treat `plaintext.db`, HTML, Markdown, and CSV outputs as sensitive private
-  data.
+- Treat `plaintext.db` (if you produced one with `decrypt`), HTML, Markdown,
+  and CSV outputs as sensitive private data.
 - Delete or encrypt intermediate files when recovery work is complete.
 - The tool reads local files and writes local outputs only; it does not contact
   Telegram or any third-party recovery service.
@@ -478,7 +587,8 @@ about which plaintext database came from which account directory.
 | `Key file not found` | Confirm the `.tempkeyEncrypted` path and quote paths containing spaces |
 | `Database file not found` | Confirm the selected `account-*` directory has `postbox/db/db_sqlite` |
 | `Failed to decrypt database` | Verify the key and DB belong to the same Telegram account; pass `--passcode` if Passcode Lock was enabled |
-| `file is not a database` | Usually a mismatched key/database pair or an unsupported SQLCipher profile |
+| `file is not a database` on a read command without `--key` | The file looks like an encrypted `db_sqlite`; rerun with `--key PATH` (and `--passcode` if needed) |
+| `Unable to derive any key material` | The `.tempkeyEncrypted` could not be parsed; double-check `--passcode` and that the file belongs to the selected `account-*` |
 | `No peer records found` | Run `diagnose` and confirm this is the native macOS Telegram database |
 | `No messages found with the current filters` | Remove date filters, confirm `--peer-id`, or try exporting all decoded messages |
 | `sqlcipher3` install fails | Install SQLCipher with Homebrew, then reinstall the package in a clean virtual environment |
@@ -522,8 +632,14 @@ Telegram.
 
 ### Should I use the original Telegram database directly?
 
-The command can read it, but for recovery work it is safer to copy the key and
-database into a separate working directory and decrypt from that copy.
+The `list-peers`, `diagnose`, and `export` commands can read the encrypted
+`db_sqlite` in place when you pass `--key`. Both the encrypted and the
+plaintext database are opened in read-only mode, so the original is never
+modified by these commands. Even so, for recovery work it is still
+recommended to copy `.tempkeyEncrypted` and the encrypted `db_sqlite` into
+a separate working directory and run from those copies — that way a stray
+`decrypt` (or any future write-capable tool) cannot touch the live data,
+and no plaintext copy is left behind unless you explicitly need one.
 
 ### Why does this only support Telegram for macOS?
 

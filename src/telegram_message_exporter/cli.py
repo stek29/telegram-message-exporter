@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
-
-import sqlite3
+from typing import Iterable, Optional
 
 from . import __version__, crypto
 from .db import (
@@ -70,12 +68,9 @@ def cmd_decrypt(args: argparse.Namespace) -> None:
 
 
 def cmd_diagnose(args: argparse.Namespace) -> None:
-    """Inspect a plaintext Telegram DB."""
-    db_path = Path(args.db).expanduser()
-    if not db_path.exists():
-        raise SystemExit(f"Database file not found: {db_path}")
+    """Inspect a Telegram DB (plaintext or encrypted)."""
+    db_path, conn = _open_for_reading(args)
 
-    conn = sqlite3.connect(str(db_path))
     tables = list_tables(conn)
     print("Tables:")
     for table in tables:
@@ -97,12 +92,9 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
 
 
 def cmd_list_peers(args: argparse.Namespace) -> None:
-    """List peer IDs from a plaintext DB."""
-    db_path = Path(args.db).expanduser()
-    if not db_path.exists():
-        raise SystemExit(f"Database file not found: {db_path}")
+    """List peer IDs from a Telegram DB (plaintext or encrypted)."""
+    db_path, conn = _open_for_reading(args)
 
-    conn = sqlite3.connect(str(db_path))
     results = []
     peer_table = PostboxTable.PEER.sqlite_name
     if peer_table in list_tables(conn) and is_postbox_kv_table(conn, peer_table):
@@ -123,11 +115,7 @@ def cmd_list_peers(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export messages to Markdown, HTML, or CSV."""
-    db_path = Path(args.db).expanduser()
-    if not db_path.exists():
-        raise SystemExit(f"Database file not found: {db_path}")
-
-    conn = sqlite3.connect(str(db_path))
+    db_path, conn = _open_for_reading(args)
     table = args.table or detect_message_table(conn)
 
     peer_id = _resolve_peer_id(conn, args.contact, args.peer_id)
@@ -274,6 +262,30 @@ def _resolve_peer_id(
     raise SystemExit("Contact name not found. Use list-peers or provide --peer-id.")
 
 
+def _open_for_reading(args: argparse.Namespace) -> tuple[Path, object]:
+    """Open a database for a read-only subcommand.
+
+    If `args.key` is set, treat `args.db` as an encrypted SQLCipher file and
+    derive a key from `.tempkeyEncrypted`. Otherwise open `args.db` as a
+    plaintext SQLite database. Always opens in read-only mode. The caller is
+    responsible for closing the returned connection.
+    """
+    db_path = Path(args.db).expanduser()
+    if not db_path.exists():
+        raise SystemExit(f"Database file not found: {db_path}")
+
+    key_path: Optional[Path] = None
+    passcodes: Optional[Iterable[bytes]] = None
+    if getattr(args, "key", None):
+        key_path = Path(args.key).expanduser()
+        if not key_path.exists():
+            raise SystemExit(f"Key file not found: {key_path}")
+        passcodes = crypto.read_passcodes(args.passcode)
+
+    result = crypto.open_database(db_path, key_path, passcodes, readonly=True)
+    return db_path, result.connection
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -298,20 +310,44 @@ def build_parser() -> argparse.ArgumentParser:
     decrypt.add_argument("--debug", action="store_true", help="Print extra diagnostics")
     decrypt.set_defaults(func=cmd_decrypt)
 
-    diagnose = subparsers.add_parser("diagnose", help="Inspect plaintext DB")
-    diagnose.add_argument("--db", required=True, help="Path to plaintext DB")
+    diagnose = subparsers.add_parser("diagnose", help="Inspect Telegram DB")
+    diagnose.add_argument("--db", required=True, help="Path to Telegram DB")
+    diagnose.add_argument(
+        "--key",
+        help="Path to .tempkeyEncrypted (treat --db as encrypted SQLCipher)",
+    )
+    diagnose.add_argument(
+        "--passcode",
+        help="Telegram local passcode (or set TG_LOCAL_PASSCODE); ignored for plaintext DBs",
+    )
     diagnose.add_argument("--table", help="Table name to sample")
     diagnose.set_defaults(func=cmd_diagnose)
 
     list_peers = subparsers.add_parser("list-peers", help="Find peer IDs by name")
-    list_peers.add_argument("--db", required=True, help="Path to plaintext DB")
+    list_peers.add_argument("--db", required=True, help="Path to Telegram DB")
+    list_peers.add_argument(
+        "--key",
+        help="Path to .tempkeyEncrypted (treat --db as encrypted SQLCipher)",
+    )
+    list_peers.add_argument(
+        "--passcode",
+        help="Telegram local passcode (or set TG_LOCAL_PASSCODE); ignored for plaintext DBs",
+    )
     list_peers.add_argument("--search", help="Name fragment to search")
     list_peers.set_defaults(func=cmd_list_peers)
 
     export = subparsers.add_parser(
         "export", help="Export messages to Markdown/HTML/CSV"
     )
-    export.add_argument("--db", required=True, help="Path to plaintext DB")
+    export.add_argument("--db", required=True, help="Path to Telegram DB")
+    export.add_argument(
+        "--key",
+        help="Path to .tempkeyEncrypted (treat --db as encrypted SQLCipher)",
+    )
+    export.add_argument(
+        "--passcode",
+        help="Telegram local passcode (or set TG_LOCAL_PASSCODE); ignored for plaintext DBs",
+    )
     export.add_argument("--contact", help="Contact name to match")
     export.add_argument("--peer-id", type=int, help="Peer ID to export")
     export.add_argument("--table", help="Override messages table")
