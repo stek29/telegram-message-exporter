@@ -525,6 +525,28 @@ def _resource_cache_key(resource: Any) -> Optional[str]:
     return None
 
 
+def peer_photo_cache_key(representations: Any) -> Optional[str]:
+    """Return the small (80x80) peer photo cache key, or ``None``.
+
+    Telegram stores a peer's profile photo on the ``t2`` (PEER) record as
+    ``ph: [TelegramMediaImageRepresentation]``; each entry has a resource of
+    type ``CloudPeerPhotoSizeMediaResource`` whose ``size_spec`` is ``0`` for
+    the small 80x80 variant and ``1`` for the full-size 640x640 variant. We
+    prefer the small variant for chat avatars.
+    """
+    if not isinstance(representations, (list, tuple)):
+        return None
+    for entry in representations:
+        if not isinstance(entry, PostboxObject):
+            continue
+        resource = entry.fields.get("resource")
+        if not isinstance(resource, PostboxObject):
+            continue
+        if resource.fields.get("size_spec") == 0:
+            return _resource_cache_key(resource)
+    return None
+
+
 TELEGRAM_MEDIA_VIDEO_FLAG_INSTANT_ROUND_VIDEO = 1
 
 
@@ -1332,6 +1354,7 @@ def _peer_info_from_payload(peer_id: int, data: Any) -> Optional[PeerInfo]:
         is_fake=bool(raw_flags & fake_bit),
         is_premium=bool(raw_flags & 0b10000),
         name_color=name_color,
+        photo_cache_key=peer_photo_cache_key(data.get("ph")),
     )
 
 

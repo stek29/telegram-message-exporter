@@ -67,6 +67,7 @@ class PeerInfo:
     is_fake: bool = False
     is_premium: bool = False
     name_color: Optional[int] = None
+    photo_cache_key: Optional[str] = None
 
 
 @dataclass(frozen=True)

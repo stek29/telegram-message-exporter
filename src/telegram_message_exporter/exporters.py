@@ -271,6 +271,29 @@ header.header-panel {
 }
 .msg { display: flex; margin: 12px 0; gap: 10px; }
 .msg.out { justify-content: flex-end; }
+.msg-avatar,
+.msg-avatar-initial {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  text-transform: uppercase;
+  box-shadow: 0 4px 10px rgba(2, 6, 23, 0.4);
+  margin-top: 2px;
+  overflow: hidden;
+}
+.msg-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .bubble {
   padding: 12px 16px;
   border-radius: 14px;
@@ -309,6 +332,27 @@ header.header-panel {
   border-radius: 50%;
   flex: 0 0 auto;
   box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.6);
+}
+.participant-avatar,
+.participant-avatar-initial {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  overflow: hidden;
+}
+.participant-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .bubble img, .bubble video { max-width: 100%; height: auto; border-radius: 10px; }
 .bubble audio { width: min(420px, 100%); }
@@ -467,6 +511,7 @@ class ParticipantEntry:
     peer_id: Optional[int]
     name: str
     color: str
+    photo_path: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -487,6 +532,7 @@ class RenderOptions:
     peer_map: Optional[dict[int, PeerInfo]] = None
     show_direction: bool = False
     tz: Optional[object] = None
+    peer_photo_paths: Optional[dict[int, str]] = None
 
 
 def _copy_single_attachment(
@@ -596,6 +642,73 @@ def copy_message_media(
             replace(message, attachments=tuple(updated_attachments))
         )
     return updated_messages, copied_count
+
+
+def copy_peer_photos(
+    peer_map: Optional[dict[int, PeerInfo]],
+    media_dir: Path,
+    out_path: Path,
+) -> dict[int, str]:
+    """Copy peer profile photos into the export's ``_media`` directory.
+
+    Returns a ``{peer_id: relative_path}`` map for peers whose photo file
+    exists in ``media_dir`` and was successfully copied. Peers with no
+    ``photo_cache_key`` or with a key that doesn't resolve to a local file
+    are silently skipped (the caller will render an initial-letter
+    placeholder for them).
+    """
+    if not peer_map:
+        return {}
+    target_dir = out_path.parent / f"{out_path.stem}_media"
+    copied_keys: set[str] = set()
+    paths: dict[int, str] = {}
+    for peer_id, info in peer_map.items():
+        cache_key = info.photo_cache_key
+        if not cache_key:
+            continue
+        source = media_dir / cache_key
+        if not source.is_file():
+            continue
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / cache_key
+        if cache_key not in copied_keys:
+            shutil.copy2(source, target)
+            copied_keys.add(cache_key)
+        paths[peer_id] = (Path(target_dir.name) / cache_key).as_posix()
+    return paths
+
+
+def _peer_initial(name: str) -> str:
+    """Return a single uppercase letter for avatar placeholders."""
+    for ch in name:
+        if not ch.isspace():
+            return ch.upper()
+    return "?"
+
+
+def _render_avatar_html(
+    handle,
+    photo_path: Optional[str],
+    initial: str,
+    color: str,
+    css_class: str = "avatar",
+) -> None:
+    """Write an avatar cell: ``<img>`` if a photo is available, else initial."""
+    safe_class = html.escape(css_class, quote=True)
+    if photo_path:
+        safe_src = html.escape(photo_path, quote=True)
+        handle.write(
+            f'<div class="{safe_class}">'
+            f'<img loading="lazy" decoding="async" src="{safe_src}" alt="">'
+            f"</div>"
+        )
+    else:
+        safe_color = html.escape(color, quote=True)
+        safe_initial = html.escape(initial, quote=True)
+        handle.write(
+            f'<div class="{safe_class} {safe_class}-initial" '
+            f'style="background:{safe_color}">{safe_initial}</div>'
+        )
 
 
 def resolve_speaker(msg: Message, peer_map: Optional[dict[int, PeerInfo]]) -> str:
@@ -1031,6 +1144,7 @@ def build_html_stats(
     messages: list[Message],
     title: str,
     peer_map: Optional[dict[int, PeerInfo]],
+    peer_photo_paths: Optional[dict[int, str]] = None,
 ) -> HtmlStats:
     """Build summary stats for the HTML export."""
     timestamps = [msg.timestamp for msg in messages if msg.timestamp]
@@ -1038,6 +1152,7 @@ def build_html_stats(
     end = max(timestamps) if timestamps else None
 
     color_map = collect_peer_color_map(messages, peer_map)
+    photo_paths = peer_photo_paths or {}
 
     seen: set[tuple[Optional[int], str]] = set()
     entries: list[ParticipantEntry] = []
@@ -1058,7 +1173,8 @@ def build_html_stats(
                 else PeerInfo("peer", None),
                 peer_id if peer_id is not None else 0,
             )[0]
-        entries.append(ParticipantEntry(peer_id, speaker, solid))
+        photo_path = photo_paths.get(peer_id) if peer_id is not None else None
+        entries.append(ParticipantEntry(peer_id, speaker, solid, photo_path))
     title_entry = next((entry for entry in entries if entry.name == title), None)
     if title_entry is None:
         title_color, _ = peer_display_color(PeerInfo("peer", None), 0)
@@ -1243,9 +1359,10 @@ def render_html(
     title: str,
     out_path: Path,
     peer_map: Optional[dict[int, PeerInfo]] = None,
+    peer_photo_paths: Optional[dict[int, str]] = None,
 ) -> None:
     """Export messages to a styled HTML transcript."""
-    stats = build_html_stats(messages, title, peer_map)
+    stats = build_html_stats(messages, title, peer_map, peer_photo_paths)
     color_map = collect_peer_color_map(messages, peer_map)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1265,7 +1382,7 @@ def render_html(
         _render_header(handle, title)
         _render_stats(handle, stats)
         _render_toolbar(handle)
-        _render_messages(handle, messages, peer_map)
+        _render_messages(handle, messages, peer_map, peer_photo_paths)
         _render_footer(handle)
         handle.write("</div></body></html>")
 
@@ -1337,8 +1454,15 @@ def _render_stats(handle, stats: HtmlStats) -> None:
     for entry in stats.participants:
         safe_name = html.escape(entry.name)
         safe_color = html.escape(entry.color)
+        handle.write(f'<span class="participant" style="color:{safe_color}">')
+        _render_avatar_html(
+            handle,
+            entry.photo_path,
+            _peer_initial(entry.name),
+            entry.color,
+            css_class="participant-avatar",
+        )
         handle.write(
-            f'<span class="participant" style="color:{safe_color}">'
             f'<span class="swatch" style="background:{safe_color}"></span>'
             f"{safe_name}</span>"
         )
@@ -1366,8 +1490,11 @@ def _render_messages(
     handle,
     messages: list[Message],
     peer_map: Optional[dict[int, PeerInfo]],
+    peer_photo_paths: Optional[dict[int, str]] = None,
 ) -> None:
     handle.write('<div class="chat-card glass" id="chat-card">')
+    photo_paths = peer_photo_paths or {}
+    color_map = collect_peer_color_map(messages, peer_map)
     for msg in messages:
         iso = msg.timestamp.isoformat() if msg.timestamp else ""
         time_str = msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else "??:??:??"
@@ -1390,6 +1517,18 @@ def _render_messages(
         handle.write(
             f'<div class="msg {direction}" data-iso="{html.escape(iso)}"{peer_id_attr}>'
         )
+        if peer_id is not None:
+            peer_info = peer_map.get(peer_id) if peer_map else None
+            if peer_info is None:
+                peer_info = PeerInfo("peer", None)
+            solid, _ = color_map.get(peer_id) or peer_display_color(peer_info, peer_id)
+            _render_avatar_html(
+                handle,
+                photo_paths.get(peer_id),
+                _peer_initial(peer_info.name),
+                solid,
+                css_class="msg-avatar",
+            )
         handle.write('<div class="bubble">')
         handle.write(
             f'<div class="meta">[{time_el}] '

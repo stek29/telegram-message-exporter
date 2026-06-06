@@ -25,6 +25,7 @@ from .db import (
 from .exporters import (
     RenderOptions,
     copy_message_media,
+    copy_peer_photos,
     render_csv,
     render_html,
     render_markdown,
@@ -184,11 +185,17 @@ def cmd_export(args: argparse.Namespace) -> None:
     title = args.contact or _title_from_peer(peer_map, peer_id)
     out_path = Path(args.out) if args.out else _default_out_path(args.format)
     media_dir = _resolve_media_dir(args.media_dir, db_path)
+    peer_photo_paths: dict[int, str] = {}
     if media_dir is not None:
         messages, copied_count = copy_message_media(messages, media_dir, out_path)
+        peer_photo_paths = copy_peer_photos(peer_map, media_dir, out_path)
         if args.debug:
             print(
                 f"[media] copied {copied_count} cached files from {media_dir}",
+                file=sys.stderr,
+            )
+            print(
+                f"[media] copied {len(peer_photo_paths)} peer photos from {media_dir}",
                 file=sys.stderr,
             )
 
@@ -208,7 +215,13 @@ def cmd_export(args: argparse.Namespace) -> None:
     elif args.format == "csv":
         render_csv(messages, out_path, peer_map=peer_map, tz=tz)
     elif args.format == "html":
-        render_html(messages, title, out_path, peer_map=peer_map)
+        render_html(
+            messages,
+            title,
+            out_path,
+            peer_map=peer_map,
+            peer_photo_paths=peer_photo_paths or None,
+        )
     else:
         raise SystemExit(f"Unknown format: {args.format}")
 
